@@ -469,12 +469,12 @@ class ADIntegrator(mi.CppADIntegrator):
                        weight: mi.Float,
                        alpha: mi.Float,
                        wavelengths: mi.Spectrum):
-        '''Helper function to splat values to a imageblock'''
+        '''Helper function to splat values to an imageblock'''
         if (dr.all(mi.has_flag(film.flags(), mi.FilmFlags.Special))):
             aovs = film.prepare_sample(value, wavelengths,
-                                        block.channel_count(),
-                                        weight=weight,
-                                        alpha=alpha)
+                                       block.channel_count(),
+                                       weight=weight,
+                                       alpha=alpha)
             block.put(pos, aovs)
             del aovs
         else:
@@ -969,6 +969,102 @@ class RBIntegrator(ADIntegrator):
 
             # Run kernel representing side effects of the above
             dr.eval()
+
+class PSIntegrator(ADIntegrator):
+    """
+    Abstract base class of projective-sampling/path-space style differentiable
+    integrators.
+    """
+
+    def __init__(self, props):
+        super().__init__(props)
+
+        # Effective sample count per pixel for the continuous derivative, the
+        # primarily visible discontinuous derivative, and the indirect
+        # discontinuous derivative.
+        self.sppc = props.get('sppc', 8)
+        self.sppp = props.get('sppp', 8)
+        self.sppi = props.get('sppi', 8)
+
+    def render_forward(self,
+                       scene: mi.Scene,
+                       params: Any,
+                       sensor: Union[int, mi.Sensor] = 0,
+                       seed: int = 0,
+                       spp: int = 0) -> mi.TensorXf:
+
+        if isinstance(sensor, int):
+            sensor = scene.sensors()[sensor]
+
+        film = sensor.film()
+        aovs = self.aovs()
+
+        film_size = film.size()
+        result_img = dr.zeros(mi.TensorXf, (film_size[1], film_size[0], 3))  # FIXME
+
+        # FIXME: spp override
+
+        # Continuous derivative
+        if self.sppc > 0:
+            with dr.suspend_grad():
+                sampler, spp = self.prepare(sensor, seed, self.sppc, aovs)
+                ray, weight, pos, _ = self.sample_rays(scene, sensor, sampler, reparam=None)
+            L, valid, _ = self.sample(
+                mode=dr.ADMode.Forward,
+                scene=scene,
+                sampler=sampler,
+                ray=ray,
+                active=mi.Bool(True)
+            )
+
+            block = film.create_block()
+            block.set_coalesce(block.coalesce() and self.sppc >= 4)
+            ADIntegrator._splat_to_block(
+                block, film, pos,
+                value=L * weight,
+                weight=1.0,
+                alpha=dr.select(valid, mi.Float(1), mi.Float(0)),
+                wavelengths=ray.wavelengths
+            )
+
+            # Perform the weight division and return an image tensor
+            film.put_block(block)   
+            result_img += film.develop()
+
+        # Primarily visible (direct) discontinuous derivative
+        if self.sppp > 0:
+            with dr.suspend_grad():
+                sampler, spp = self.prepare(sensor, 0xffffffff ^ seed, self.sppp, aovs)
+            result_img += self.camera_derivative_wrapper(scene, sensor, sampler, spp)
+
+        # Indirect discontinuous derivative
+        if self.sppi > 0:
+            with dr.suspend_grad():
+                sampler, spp = self.prepare(sensor, 0xaa00aa00 ^ seed, self.sppi, aovs)
+            result_img += self.indirect_derivative_wrapper(scene, sensor, sampler, self.psdr)
+
+        dr.forward_to(result_img, flags=dr.ADFlag.ClearEdges)
+        # dr.forward_to(result_img)  # FIXME DRJIT BUG
+
+        return dr.grad(result_img)
+
+    def sample(self,
+               mode: dr.ADMode,
+               scene: mi.Scene,
+               sampler: mi.Sampler,
+               ray: mi.Ray3f,
+               depth: mi.UInt32,
+               active: mi.Bool) -> Tuple[mi.Spectrum, mi.Bool, Any]:
+        """
+        See ADIntegrator.sample() for a description of this function's purpose.
+
+        Output ``seedray`` (``any``):
+            The seed rays to be projected...
+        """
+
+        raise Exception('PSIntegrator does not provide the sample() method. '
+                        'It should be implemented by subclasses that '
+                        'specialize the abstract PSIntegrator interface.')
 
 # ---------------------------------------------------------------------------
 # Default implementation of Integrator.render_forward/backward
