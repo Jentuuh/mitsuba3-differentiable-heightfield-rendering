@@ -13,6 +13,7 @@ add_plugin(sphere       sphere.cpp)
 add_plugin(cube         cube.cpp)
 add_plugin(bsplinecurve bsplinecurve.cpp)
 add_plugin(linearcurve  linearcurve.cpp)
+add_plugin(heightfield  heightfield.cpp)
 
 add_plugin(shapegroup   shapegroup.cpp)
 add_plugin(instance     instance.cpp)
