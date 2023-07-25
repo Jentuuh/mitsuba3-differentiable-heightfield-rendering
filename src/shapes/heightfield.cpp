@@ -124,11 +124,13 @@ public:
             m_heightfield_texture = InputTexture2f(InputTensorXf((float*)normalized->data(), 3, shape), true, false,
                 dr::FilterMode::Linear, dr::WrapMode::Clamp);        
         } else {
-            InputFloat default_data[9] = { 0.f, 0.f, 0.f, 0.f,
+            InputFloat default_data[16] = { 0.f, 0.f, 0.f, 0.f,
                                            0.f, 0.f, 0.f, 0.f, 
-                                           0.0f };
-            m_res_x = 3;
-            m_res_y = 3;
+                                           0.f, 0.f, 0.f, 0.f,
+                                           0.f, 0.f, 0.f, 0.f };
+
+            m_res_x = 4;
+            m_res_y = 4;
 
             size_t default_shape[3] = { m_res_x, m_res_y, 1 };
             m_heightfield_texture = InputTexture2f(
@@ -246,25 +248,22 @@ public:
                 // 00 (left bottom)
                 bbox.expand(to_world.transform_affine(ScalarPoint3f(       
                     -1.0f + ((x + 0) * cell_size[1]), - 1.0f + (((shape[0] - 1) - (y - 0)) * cell_size[0]), 
-                        grid[(y - 0) * shape[0] + (x + 0)])));
+                        m_max_height.scalar() * grid[(y - 0) * shape[0] + (x + 0)])));
                 // 01 (left top)
                 bbox.expand(to_world.transform_affine(ScalarPoint3f(
                         -1.0f + ((x + 0) * cell_size[1]), -1.0f + (((shape[0] - 1) - (y - 1)) * cell_size[0]), 
-                        grid[(y - 1) * shape[0] + (x + 0)])));
+                        m_max_height.scalar() * grid[(y - 1) * shape[0] + (x + 0)])));
                 // 10 (right bottom)
                 bbox.expand(to_world.transform_affine(ScalarPoint3f(
                         -1.0f + ((x + 1) * cell_size[1]), -1.0f + (((shape[0] - 1) - (y - 0)) * cell_size[0]), 
-                        grid[(y - 0) * shape[0] + (x + 1)])));
+                        m_max_height.scalar() * grid[(y - 0) * shape[0] + (x + 1)])));
                 // 11 (right top)
                 bbox.expand(to_world.transform_affine(ScalarPoint3f(
                         -1.0f + ((x + 1) * cell_size[1]), -1.0f + (((shape[0] - 1) - (y - 1)) * cell_size[0]), 
-                        grid[(y - 1) * shape[0] + (x + 1)])));
+                        m_max_height.scalar() * grid[(y - 1) * shape[0] + (x + 1)])));
 
                 host_aabbs[count] = BoundingBoxType(bbox);
                 count++;
-
-                // TODO: remove
-                std::cout << bbox << std::endl;
             }
         }
 
@@ -293,16 +292,12 @@ public:
     ScalarBoundingBox3f bbox() const override {
         ScalarBoundingBox3f bbox;
         ScalarTransform4f to_world = m_to_world.scalar();
-        
-        bbox.expand(to_world.transform_affine(ScalarPoint3f(-1.f, -1.f, 0.f)));
-        bbox.expand(to_world.transform_affine(ScalarPoint3f((1.0f, -1.f, 0.f))));
-        bbox.expand(to_world.transform_affine(ScalarPoint3f(-1.f, -1.f, m_max_height.scalar())));
-        bbox.expand(to_world.transform_affine(ScalarPoint3f((1.0f, -1.f, m_max_height.scalar()))));
-        bbox.expand(to_world.transform_affine(ScalarPoint3f(-1.f, 1.0f, 0.0f)));
-        bbox.expand(to_world.transform_affine(ScalarPoint3f(1.0f, 1.0f, 0.0f)));
-        bbox.expand(to_world.transform_affine(ScalarPoint3f(-1.f, 1.0f, m_max_height.scalar())));
-        bbox.expand(to_world.transform_affine(ScalarPoint3f(1.0f, 1.0f, m_max_height.scalar())));
 
+        bbox.expand(to_world.transform_affine(ScalarPoint3f(-1.f, -1.f, 0.f)));
+        bbox.expand(to_world.transform_affine(ScalarPoint3f(-1.f,  1.f, 0.f)));
+        bbox.expand(to_world.transform_affine(ScalarPoint3f( 1.f, -1.f, 0.f)));
+        bbox.expand(to_world.transform_affine(ScalarPoint3f( 1.f,  1.f, 0.f)));
+        bbox.expand(to_world.transform_affine(ScalarPoint3f( 0.f,  0.f, m_max_height.scalar())));
         return bbox;
     }
 
@@ -377,9 +372,6 @@ public:
         Point<FloatP, 2> local_min_target_bounds = Point<FloatP, 2>(-1.0f + (float)row_offset * cell_size[0], -1.0f + (float)row_nr * cell_size[1]);
         Point<FloatP, 2> local_max_target_bounds = Point<FloatP, 2>(-1.0f + (float)(row_offset + 1) * cell_size[0], -1.0f + (float)(row_nr + 1) * cell_size[1]);
 
-        // std::cout << local_min_target_bounds << std::endl;
-        // std::cout << local_max_target_bounds << std::endl;
-
         // Corresponds to rectangle intersection, except that each voxel now has its own rectangle 
         // to whose space we should transform the ray.
         Ray3fP ray;
@@ -398,8 +390,6 @@ public:
         uint32_t left_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset;
         uint32_t right_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset + 1;
 
-
-        
         FloatP max_displacement_in_texel = dr::maximum(m_heightfield_texture.tensor().data()[left_bottom_index],
                                                    dr::maximum(m_heightfield_texture.tensor().data()[right_bottom_index],
                                                    dr::maximum(m_heightfield_texture.tensor().data()[left_top_index],
@@ -407,11 +397,9 @@ public:
 
         // Check how high the heightfield is at current cell (we will intersect a plane at this height parallel to the XY plane)
         FloatP z_displacement = max_displacement_in_texel * m_max_height.scalar();
-
-        // std::cout <<" Max displacement:" << max_displacement_in_texel << std::endl;
         
         // We intersect with the plane Z = `z_displacement`, parallel to the XY plane (flat heightfield in local space is defined as a rectangle aligned with XY)
-        FloatP t = z_displacement - ray.o.z() / ray.d.z();
+        FloatP t = (z_displacement - ray.o.z()) / ray.d.z();
         Point<FloatP, 3> local = ray(t);
 
         // Is intersection within ray segment and heightfield cell?
@@ -424,7 +412,7 @@ public:
 
         
         return { dr::select(active, t, dr::Infinity<FloatP>),
-            Point<FloatP, 2>(local.x(), local.y()), ((uint32_t) -1), 0 };
+            Point<FloatP, 2>(local.x(), local.y()), ((uint32_t) -1), prim_index };
     }
 
 
@@ -433,8 +421,7 @@ public:
                                      ScalarIndex prim_index,
                                      dr::mask_t<FloatP> active) const {
         MI_MASK_ARGUMENT(active);    
-
-    float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
+             float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
 
         uint32_t amount_rows = m_res_x - 1;
         uint32_t values_per_row = m_res_x;
@@ -470,9 +457,9 @@ public:
 
         // Check how high the heightfield is at current cell (we will intersect a plane at this height parallel to the XY plane)
         FloatP z_displacement = max_displacement_in_texel * m_max_height.scalar();
-    
+        
         // We intersect with the plane Z = `z_displacement`, parallel to the XY plane (flat heightfield in local space is defined as a rectangle aligned with XY)
-        FloatP t = z_displacement - ray.o.z() / ray.d.z();
+        FloatP t = (z_displacement - ray.o.z()) / ray.d.z();
         Point<FloatP, 3> local = ray(t);
 
         // Is intersection within ray segment and heightfield cell?
@@ -510,12 +497,13 @@ public:
 
         } else {
             si.t = pi.t;
-            // Re-project intersection point found along ray onto the heightfield to improve accuracy
-            Point3f p = ray(pi.t);
-            Float dist = dr::dot(to_world.translation() - p, m_frame.n);
-            si.p = p + dist * m_frame.n;
+            si.p = ray(pi.t);
+            // // Re-project intersection point found along ray onto the heightfield to improve accuracy
+            // Point3f p = ray(pi.t);
+            // Float dist = dr::dot(to_world.translation() - p, m_frame.n);
+            // si.p = p + dist * m_frame.n;
         }
-
+        
         si.t = dr::select(active, si.t, dr::Infinity<Float>);
         si.n          = m_frame.n;
         si.sh_frame.n = m_frame.n;
@@ -540,20 +528,20 @@ public:
             std::cout << "------------------------------------------------" << std::endl;
             for(uint32_t y = 0; y < height; y++)
             {
-                std::cout <<"| " << ((float*)heightfield_data->data())[y * width + x] << " |";
+                std::cout <<"| " << ((float*)heightfield_data->data())[x * width + y] << " |";
             }
         }
         std::cout << "------------------------------------------------" << std::endl;
 
     }
 
-        MI_INLINE void print_heightfield_texture() const {
+    MI_INLINE void print_heightfield_texture() const {
         for(uint32_t x = 0; x < m_res_x; x++)
         {
             std::cout << "------------------------------------------------" << std::endl;
             for(uint32_t y = 0; y < m_res_y; y++)
             {
-                std::cout <<"| " << (m_heightfield_texture.tensor().data())[y * m_res_x + x] << " |";
+                std::cout <<"| " << (m_heightfield_texture.tensor().data())[x * m_res_x + y] << " |";
             }
         }
         std::cout << "------------------------------------------------" << std::endl;
