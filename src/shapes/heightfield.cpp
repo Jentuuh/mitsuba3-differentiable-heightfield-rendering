@@ -365,14 +365,14 @@ public:
 
         uint32_t amount_rows = m_res_x - 1;
         uint32_t values_per_row = m_res_x;
-        uint32_t row_nr = dr::floor((float)prim_index / (float)(values_per_row - 1)); // floor(prim_index / amount_bboxes_per_row)
-        uint32_t row_offset = prim_index % (values_per_row - 1); // prim_index % amount_bboxes_per_row
+        uint32_t row_nr = dr::floor((float)prim_index / (float) amount_rows); // floor(prim_index / amount_bboxes_per_row)
+        uint32_t row_offset = prim_index % (amount_rows); // prim_index % amount_bboxes_per_row
 
         // Compute the fractional bounds of the cell we're testing the intersection for
         Point<FloatP, 2> local_min_target_bounds = Point<FloatP, 2>(-1.0f + (float)row_offset * cell_size[0], -1.0f + (float)row_nr * cell_size[1]);
         Point<FloatP, 2> local_max_target_bounds = Point<FloatP, 2>(-1.0f + (float)(row_offset + 1) * cell_size[0], -1.0f + (float)(row_nr + 1) * cell_size[1]);
 
-        // Corresponds to rectangle intersection, except that each voxel now has its own rectangle 
+        // Corresponds to rectangle intersection, except that each voxel now has its own small rectangle 
         // to whose space we should transform the ray.
         Ray3fP ray;
 
@@ -382,7 +382,7 @@ public:
         else
             ray = m_to_object.value().transform_affine(ray_);
         
-        // `row_nr * values_per_row` gives us the offset to get to the current row, we add the 
+        // `(amount_rows - row_nr) * values_per_row` gives us the offset to get to the current row, we add the 
         // row offset to this to get the absolute offset to obtain the corresponding texel of the
         // current AABB (+ 1 in both dimensions to get right and top texels)  
         uint32_t left_bottom_index = (amount_rows - row_nr) * values_per_row + row_offset;
@@ -390,13 +390,13 @@ public:
         uint32_t left_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset;
         uint32_t right_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset + 1;
 
-        FloatP max_displacement_in_texel = dr::maximum(m_heightfield_texture.tensor().data()[left_bottom_index],
+        FloatP max_displacement_in_tile = dr::maximum(m_heightfield_texture.tensor().data()[left_bottom_index],
                                                    dr::maximum(m_heightfield_texture.tensor().data()[right_bottom_index],
                                                    dr::maximum(m_heightfield_texture.tensor().data()[left_top_index],
                                                    m_heightfield_texture.tensor().data()[right_top_index])));
 
         // Check how high the heightfield is at current cell (we will intersect a plane at this height parallel to the XY plane)
-        FloatP z_displacement = max_displacement_in_texel * m_max_height.scalar();
+        FloatP z_displacement = max_displacement_in_tile * m_max_height.scalar();
         
         // We intersect with the plane Z = `z_displacement`, parallel to the XY plane (flat heightfield in local space is defined as a rectangle aligned with XY)
         FloatP t = (z_displacement - ray.o.z()) / ray.d.z();
@@ -450,13 +450,13 @@ public:
         uint32_t left_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset;
         uint32_t right_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset + 1;
 
-        FloatP max_displacement_in_texel = dr::maximum(m_heightfield_texture.tensor().data()[left_bottom_index],
+        FloatP max_displacement_in_tile = dr::maximum(m_heightfield_texture.tensor().data()[left_bottom_index],
                                                    dr::maximum(m_heightfield_texture.tensor().data()[right_bottom_index],
                                                    dr::maximum(m_heightfield_texture.tensor().data()[left_top_index],
                                                    m_heightfield_texture.tensor().data()[right_top_index])));
 
         // Check how high the heightfield is at current cell (we will intersect a plane at this height parallel to the XY plane)
-        FloatP z_displacement = max_displacement_in_texel * m_max_height.scalar();
+        FloatP z_displacement = max_displacement_in_tile * m_max_height.scalar();
         
         // We intersect with the plane Z = `z_displacement`, parallel to the XY plane (flat heightfield in local space is defined as a rectangle aligned with XY)
         FloatP t = (z_displacement - ray.o.z()) / ray.d.z();
@@ -557,8 +557,7 @@ public:
             if (!m_optix_data_ptr)
                 m_optix_data_ptr = jit_malloc(AllocType::Device, sizeof(OptixHeightfieldData));
 
-            OptixHeightfieldData data = { bbox(), m_to_object.scalar() };
-
+            OptixHeightfieldData data = { bbox(), m_to_object.scalar(), m_res_x, m_res_y, m_heightfield_texture.tensor().array().data(), m_max_height};
             jit_memcpy(JitBackend::CUDA, m_optix_data_ptr, &data, sizeof(OptixHeightfieldData));
         }
     }
@@ -593,7 +592,6 @@ private:
     // 0.0 won't be displaced at all. 
     field<Float> m_max_height; 
     
-
     Frame3f m_frame;
 
     // Weak pointer to underlying grid texture data. Only used for llvm/scalar
