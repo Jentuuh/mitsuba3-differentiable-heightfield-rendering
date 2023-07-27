@@ -32,9 +32,9 @@ Heightfield (:monosp:`heightfield`)
 ----------------------------------------------------
 
 The heightfield is defined as a rectangular surface aligned with the XY-plane, with displacements along the positive Z-axis. 
-The surface's left bottom corner is at (0.0,0.0,0.0), while the surface's right top corner is at (1.0, 1.0, 0.0). 
+The surface's left bottom corner is at (-1.0,-1.0, 0.0), while the surface's right top corner is at (1.0, 1.0, 0.0). 
 Optionally, the heightfield can be transformed by passing the `to_world` parameter. E.g.: We could scale it along the
-X- and Y-axes. The heightfield data will then be "stretched" over this area.
+X- and Y-axes.
 
 .. pluginparameters::
 
@@ -101,7 +101,7 @@ public:
 
     Heightfield(const Properties &props) : Base(props) {        
         // Maximal height value of the heightfield (normalized height values will be scaled accordingly)
-        m_max_height = props.get<Float>("max_height", 1.0f);
+        m_max_height = props.get<ScalarFloat>("max_height", 1.0f);
 
         // Load heightfield data into Bitmap object
         if (props.has_property("filename")) {
@@ -242,7 +242,7 @@ public:
         for (size_t y = shape[0] - 1; y > 0; --y) {
             for (size_t x = 0; x < shape[1] - 1; ++x) {
                 
-                // TODO: dirty and unreadable point computation code, see how we can rewrite this
+                // TODO: unreadable point computation code, see how we can rewrite this
 
                 ScalarBoundingBox3f bbox;
                 // 00 (left bottom)
@@ -493,17 +493,17 @@ public:
 
         SurfaceInteraction3f si = dr::zeros<SurfaceInteraction3f>();
 
-        if constexpr (IsDiff) {
+        // if constexpr (IsDiff) {
 
-        } else {
-            si.t = pi.t;
-            si.p = ray(pi.t);
+        // } else {
+        si.t = pi.t;
+        si.p = ray(pi.t);
             // // Re-project intersection point found along ray onto the heightfield to improve accuracy
             // Point3f p = ray(pi.t);
             // Float dist = dr::dot(to_world.translation() - p, m_frame.n);
             // si.p = p + dist * m_frame.n;
-        }
-        
+        // }
+
         si.t = dr::select(active, si.t, dr::Infinity<Float>);
         si.n          = m_frame.n;
         si.sh_frame.n = m_frame.n;
@@ -557,10 +557,26 @@ public:
             if (!m_optix_data_ptr)
                 m_optix_data_ptr = jit_malloc(AllocType::Device, sizeof(OptixHeightfieldData));
 
-            OptixHeightfieldData data = { bbox(), m_to_object.scalar(), m_res_x, m_res_y, m_heightfield_texture.tensor().array().data(), m_max_height};
+            OptixHeightfieldData data =  { m_to_object.scalar(), m_res_x, m_res_y, m_heightfield_texture.tensor().array().data(), m_max_height.scalar()};
             jit_memcpy(JitBackend::CUDA, m_optix_data_ptr, &data, sizeof(OptixHeightfieldData));
         }
     }
+
+    void optix_build_input(OptixBuildInput &build_input) const override {
+        build_input.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
+        build_input.customPrimitiveArray.aabbBuffers   = &m_device_bboxes;
+        build_input.customPrimitiveArray.numPrimitives = m_amount_primitives;
+        build_input.customPrimitiveArray.strideInBytes = 6 * sizeof(float);
+        build_input.customPrimitiveArray.flags         = optix_geometry_flags;
+        build_input.customPrimitiveArray.numSbtRecords = 1;
+    }
+#endif
+
+
+#if defined(MI_ENABLE_CUDA)
+    static constexpr uint32_t optix_geometry_flags[1] = {
+        OPTIX_GEOMETRY_FLAG_NONE
+    };
 #endif
 
     bool parameters_grad_enabled() const override {

@@ -11,11 +11,12 @@
 #include "sphere.cuh"
 #include "bsplinecurve.cuh"
 #include "linearcurve.cuh"
+#include "heightfield.cuh"
 #else
 
 #include <unordered_map>
 
-#include <drjit-core/optix.h>
+#include <drjit-core/optix.h>   
 
 #include <mitsuba/render/optix/common.h>
 #include <mitsuba/render/optix_api.h>
@@ -32,6 +33,7 @@ enum OptixShapeType {
     Sphere,
     Cylinder,
     SDFGrid,
+    Heightfield,
     NumOptixShapeTypes
 };
 static std::string OPTIX_SHAPE_TYPE_NAMES[NumOptixShapeTypes] = {
@@ -41,7 +43,8 @@ static std::string OPTIX_SHAPE_TYPE_NAMES[NumOptixShapeTypes] = {
     "Rectangle",
     "Sphere",
     "Cylinder",
-    "SDFGrid"
+    "SDFGrid",
+    "Heightfield"
 };
 static std::unordered_map<std::string, size_t> OPTIX_SHAPE_TYPE_INDEX = [](){
     std::unordered_map<std::string, size_t> out;
@@ -53,7 +56,7 @@ static std::unordered_map<std::string, size_t> OPTIX_SHAPE_TYPE_INDEX = [](){
 
 /// Defines the ordering of the shapes for OptiX (hitgroups, SBT)
 static OptixShapeType OPTIX_SHAPE_ORDER[] = {
-    BSplineCurve, LinearCurve, Disk, Rectangle, Sphere, Cylinder, SDFGrid
+    BSplineCurve, LinearCurve, Disk, Rectangle, Sphere, Cylinder, SDFGrid, Heightfield
 };
 
 static constexpr size_t OPTIX_SHAPE_TYPE_COUNT = std::size(OPTIX_SHAPE_ORDER);
