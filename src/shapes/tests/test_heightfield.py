@@ -54,7 +54,7 @@ def test03_parameters_changed(variant_scalar_rgb):
 
     assert True
 
-def test04_ray_intersect(variant_scalar_rgb):
+def test04_ray_intersect(variants_all_ad_rgb):
     pytest.importorskip("numpy")
     import numpy as np
 

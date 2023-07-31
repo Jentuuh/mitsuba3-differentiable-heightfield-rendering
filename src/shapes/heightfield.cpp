@@ -95,7 +95,8 @@ public:
     using InputTexture2f = dr::Texture<InputFloat, 2>;
     using InputPoint1f   = Point<InputFloat, 1>;
     using InputTensorXf  = dr::Tensor<DynamicBuffer<InputFloat>>;
-
+    using Index = typename CoreAliases::UInt32;
+    
     using typename Base::ScalarIndex;
     using typename Base::ScalarSize;
 
@@ -113,7 +114,6 @@ public:
             
             // Convert to float32 representation
             ref<Bitmap> normalized = heightfield_bitmap->convert(Bitmap::PixelFormat::Y, Struct::Type::Float32, false);
-            //print_heightfield_values(normalized);
 
             m_res_x = normalized->width();
             m_res_y = normalized->height();
@@ -360,18 +360,6 @@ public:
                                    ScalarIndex prim_index,
                                    dr::mask_t<FloatP> active) const {
         MI_MASK_ARGUMENT(active);
-        
-        float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
-
-        uint32_t amount_rows = m_res_x - 1;
-        uint32_t values_per_row = m_res_x;
-        uint32_t row_nr = dr::floor((float)prim_index / (float) amount_rows); // floor(prim_index / amount_bboxes_per_row)
-        uint32_t row_offset = prim_index % (amount_rows); // prim_index % amount_bboxes_per_row
-
-        // Compute the fractional bounds of the cell we're testing the intersection for
-        Point<FloatP, 2> local_min_target_bounds = Point<FloatP, 2>(-1.0f + (float)row_offset * cell_size[0], -1.0f + (float)row_nr * cell_size[1]);
-        Point<FloatP, 2> local_max_target_bounds = Point<FloatP, 2>(-1.0f + (float)(row_offset + 1) * cell_size[0], -1.0f + (float)(row_nr + 1) * cell_size[1]);
-
         // Corresponds to rectangle intersection, except that each voxel now has its own small rectangle 
         // to whose space we should transform the ray.
         Ray3fP ray;
@@ -382,37 +370,35 @@ public:
         else
             ray = m_to_object.value().transform_affine(ray_);
         
-        // `(amount_rows - row_nr) * values_per_row` gives us the offset to get to the current row, we add the 
-        // row offset to this to get the absolute offset to obtain the corresponding texel of the
-        // current AABB (+ 1 in both dimensions to get right and top texels)  
-        uint32_t left_bottom_index = (amount_rows - row_nr) * values_per_row + row_offset;
-        uint32_t right_bottom_index = (amount_rows - row_nr) * values_per_row + row_offset + 1;
-        uint32_t left_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset;
-        uint32_t right_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset + 1;
+         // 4 vertices of candidate heightfield tile 
+        Point<FloatP, 3> tile_vertices[4];
+        get_tile_vertices_scalar(prim_index, tile_vertices);
 
-        FloatP max_displacement_in_tile = dr::maximum(m_heightfield_texture.tensor().data()[left_bottom_index],
-                                                   dr::maximum(m_heightfield_texture.tensor().data()[right_bottom_index],
-                                                   dr::maximum(m_heightfield_texture.tensor().data()[left_top_index],
-                                                   m_heightfield_texture.tensor().data()[right_top_index])));
+        FloatP t;
+        Point<FloatP, 2> uv;
+        dr::mask_t<FloatP> active_t; // Tells us which lanes intersected with triangle 1
 
-        // Check how high the heightfield is at current cell (we will intersect a plane at this height parallel to the XY plane)
-        FloatP z_displacement = max_displacement_in_tile * m_max_height.scalar();
+        // Triangle 1: Left top, left bottom, right bottom (0,1,2)
+        // 0-------
+        //  | \   |
+        //  |  \  |
+        //  |   \ |
+        // 1-------2
+        //   
+        // Triangle 2: Right bottom, left top, Right top (2,0,3)
+        // 0-------3
+        //  | \   |
+        //  |  \  |
+        //  |   \ |
+        //  -------2
         
-        // We intersect with the plane Z = `z_displacement`, parallel to the XY plane (flat heightfield in local space is defined as a rectangle aligned with XY)
-        FloatP t = (z_displacement - ray.o.z()) / ray.d.z();
-        Point<FloatP, 3> local = ray(t);
+        // Give closest intersection between two triangles (if any)              
+        std::tie(t, uv , active_t) = moeller_trumbore_two_triangles(ray, tile_vertices);
+         
+        // std::cout << t << std::endl;
 
-        // Is intersection within ray segment and heightfield cell?
-        active = active && t >= 0.f
-                        && t <= ray.maxt
-                        && local.x() >= local_min_target_bounds.x()
-                        && local.y() >= local_min_target_bounds.y()
-                        && local.x() <= local_max_target_bounds.x()
-                        && local.y() <= local_max_target_bounds.y();
-
-        
-        return { dr::select(active, t, dr::Infinity<FloatP>),
-            Point<FloatP, 2>(local.x(), local.y()), ((uint32_t) -1), prim_index };
+        return { dr::select(active_t, t, dr::Infinity<FloatP>),
+            Point<FloatP, 2>(uv.x(), uv.y()), ((uint32_t) -1), prim_index };
     }
 
 
@@ -421,17 +407,6 @@ public:
                                      ScalarIndex prim_index,
                                      dr::mask_t<FloatP> active) const {
         MI_MASK_ARGUMENT(active);    
-             float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
-
-        uint32_t amount_rows = m_res_x - 1;
-        uint32_t values_per_row = m_res_x;
-        uint32_t row_nr = dr::floor((float)prim_index / (float)(values_per_row - 1)); // floor(prim_index / amount_bboxes_per_row)
-        uint32_t row_offset = prim_index % (values_per_row - 1); // prim_index % amount_bboxes_per_row
-
-        // Compute the fractional bounds of the cell we're testing the intersection for
-        Point<FloatP, 2> local_min_target_bounds = Point<FloatP, 2>(-1.0f + (float)row_offset * cell_size[0], -1.0f + (float)row_nr * cell_size[1]);
-        Point<FloatP, 2> local_max_target_bounds = Point<FloatP, 2>(-1.0f + (float)(row_offset + 1) * cell_size[0], -1.0f + (float)(row_nr + 1) * cell_size[1]);
-
         // Corresponds to rectangle intersection, except that each voxel now has its own rectangle 
         // to whose space we should transform the ray.
         Ray3fP ray;
@@ -441,38 +416,38 @@ public:
             ray = m_to_object.scalar().transform_affine(ray_);
         else
             ray = m_to_object.value().transform_affine(ray_);
+
+        // 4 vertices of candidate heightfield tile 
+        Point<FloatP, 3> tile_vertices[4];
+        get_tile_vertices_scalar(prim_index, tile_vertices);
+
+        FloatP t;
+        Point<FloatP, 2> uv;
+        dr::mask_t<FloatP> active_t; // Tells us which lanes intersected with triangle 1
+
+        // Triangle 1: Left top, left bottom, right bottom (0,1,2)
+        // 0-------
+        //  | \   |
+        //  |  \  |
+        //  |   \ |
+        // 1-------2
+        //   
+        // Triangle 2: Right bottom, left top, Right top (2,0,3)
+        // 0-------3
+        //  | \   |
+        //  |  \  |
+        //  |   \ |
+        //  -------2
         
-        // `row_nr * values_per_row` gives us the offset to get to the current row, we add the 
-        // row offset to this to get the absolute offset to obtain the corresponding texel of the
-        // current AABB (+ 1 in both dimensions to get right and top texels)  
-        uint32_t left_bottom_index = (amount_rows - row_nr) * values_per_row + row_offset;
-        uint32_t right_bottom_index = (amount_rows - row_nr) * values_per_row + row_offset + 1;
-        uint32_t left_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset;
-        uint32_t right_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset + 1;
+        // Give closest intersection between two triangles (if any)              
+        std::tie(t, uv , active_t) = moeller_trumbore_two_triangles(ray, tile_vertices);
+         
 
-        FloatP max_displacement_in_tile = dr::maximum(m_heightfield_texture.tensor().data()[left_bottom_index],
-                                                   dr::maximum(m_heightfield_texture.tensor().data()[right_bottom_index],
-                                                   dr::maximum(m_heightfield_texture.tensor().data()[left_top_index],
-                                                   m_heightfield_texture.tensor().data()[right_top_index])));
-
-        // Check how high the heightfield is at current cell (we will intersect a plane at this height parallel to the XY plane)
-        FloatP z_displacement = max_displacement_in_tile * m_max_height.scalar();
-        
-        // We intersect with the plane Z = `z_displacement`, parallel to the XY plane (flat heightfield in local space is defined as a rectangle aligned with XY)
-        FloatP t = (z_displacement - ray.o.z()) / ray.d.z();
-        Point<FloatP, 3> local = ray(t);
-
-        // Is intersection within ray segment and heightfield cell?
-        return active && t >= 0.f
-                        && t <= ray.maxt
-                        && local.x() >= local_min_target_bounds.x()
-                        && local.y() >= local_min_target_bounds.y()
-                        && local.x() <= local_max_target_bounds.x()
-                        && local.y() <= local_max_target_bounds.y();
+        // Does ray intersect with any of the two triangles?
+        return active_t;
     }
 
     MI_SHAPE_DEFINE_RAY_INTERSECT_METHODS()
-
     SurfaceInteraction3f compute_surface_interaction(const Ray3f &ray,
                                                      const PreliminaryIntersection3f &pi,
                                                      uint32_t ray_flags,
@@ -503,12 +478,32 @@ public:
             // Float dist = dr::dot(to_world.translation() - p, m_frame.n);
             // si.p = p + dist * m_frame.n;
         // }
+        
+        // ==============================================
+        // Compute which triangle we intersected with           TODO: We currently decided to do this on the fly, might be better to pass the index via prim_index, or add another return value to the tuple that's returned from `ray_intersect_preliminary_impl`
+        // ==============================================
+        Point<Float, 3> tile_vertices[4];
+        get_tile_vertices_vectorized(pi.prim_index, tile_vertices);
+
+        Vector3f diagonal = tile_vertices[0] - tile_vertices[2];
+        Vector3f diag_normal = dr::cross(diagonal, Vector3f{0.0f, -1.0f, 0.0f});
+        Float D = -(dr::dot(diag_normal, tile_vertices[0]));
+        Float above_or_below_diagonal_plane = dr::dot(diag_normal, si.p) + D;
+
+        Vector3f normal_t1 = dr::cross(tile_vertices[0] - tile_vertices[1], tile_vertices[2] - tile_vertices[1]);
+        Vector3f normal_t2 = dr::cross(tile_vertices[0] - tile_vertices[3], tile_vertices[2] - tile_vertices[3]);
+
+        //  -------
+        //  | \neg|
+        //  |  \  |    Diagonal plane equation outcome mapping (positive --> triangle 1 / negative --> triangle 2)
+        //  |pos\ |
+        //  -------
+        si.n          = dr::select(above_or_below_diagonal_plane > 0, normal_t1, normal_t2 );
+        si.sh_frame.n = dr::select(above_or_below_diagonal_plane > 0, normal_t1, normal_t2);          // TODO: add shading normal for underlying triangles
+        si.dp_du      = dr::zeros<Vector3f>();
+        si.dp_dv      = dr::zeros<Vector3f>();
 
         si.t = dr::select(active, si.t, dr::Infinity<Float>);
-        si.n          = m_frame.n;
-        si.sh_frame.n = m_frame.n;
-        si.dp_du      = m_frame.s;
-        si.dp_dv      = m_frame.t;
         
         si.dn_du = si.dn_dv = dr::zeros<Vector3f>();
         si.shape    = this;
@@ -517,24 +512,123 @@ public:
         return si;
     }
     
-    // ==========================================================================
-    // Debugging helper (Remove later)
-    // ==========================================================================
-    MI_INLINE void print_heightfield_values(ref<Bitmap> heightfield_data) const {
-        uint32_t width = heightfield_data->width();
-        uint32_t height = heightfield_data->height();
-        for(uint32_t x = 0; x < width; x++)
-        {
-            std::cout << "------------------------------------------------" << std::endl;
-            for(uint32_t y = 0; y < height; y++)
-            {
-                std::cout <<"| " << ((float*)heightfield_data->data())[x * width + y] << " |";
-            }
-        }
-        std::cout << "------------------------------------------------" << std::endl;
+    template <typename FloatP, typename Ray3fP>
+    MI_INLINE std::tuple<FloatP,  Point<FloatP, 2>, dr::mask_t<FloatP>> moeller_trumbore_two_triangles(const Ray3fP &ray, Point<FloatP, 3> vertices[4],
+                                                                                               dr::mask_t<FloatP> active = true) const 
+    {
+        using Vector3fP = Vector<FloatP, 3>;
+
+        dr::mask_t<FloatP> active1 = active;
+        dr::mask_t<FloatP> active2 = active;
+
+        Vector3fP e1t1 = vertices[1] - vertices[0], e1t2 = vertices[3] - vertices[0], e2 = vertices[2] - vertices[0];
+
+        Vector3fP pvec = dr::cross(ray.d, e2);
+        FloatP inv_det_t1 = dr::rcp(dr::dot(e1t1, pvec));
+        FloatP inv_det_t2 = dr::rcp(dr::dot(e1t2, pvec));
+
+
+        Vector3fP tvec = ray.o - vertices[0];
+        FloatP u1 = dr::dot(tvec, pvec) * inv_det_t1;
+        FloatP u2 = dr::dot(tvec, pvec) * inv_det_t2;
+
+        active1 &= u1 >= 0.f && u1 <= 1.f;
+        active2 &= u2 >= 0.f && u2 <= 1.f;
+
+        Vector3fP qvec1 = dr::cross(tvec, e1t1);
+        Vector3fP qvec2 = dr::cross(tvec, e1t2);
+
+        FloatP v1 = dr::dot(ray.d, qvec1) * inv_det_t1;
+        FloatP v2 = dr::dot(ray.d, qvec2) * inv_det_t2;
+
+        active1 &= v1 >= 0.f && u1 + v1 <= 1.f;
+        active2 &= v2 >= 0.f && u2 + v2 <= 1.f;
+
+        FloatP t1 = dr::dot(e2, qvec1) * inv_det_t1;
+        FloatP t2 = dr::dot(e2, qvec2) * inv_det_t2;
+
+        active1 &= t1 >= 0.f && t1 <= ray.maxt;
+        active2 &= t2 >= 0.f && t2 <= ray.maxt;
+
+        // Select the closest triangle (if any intersection was found, this is covered by `closest_mask`)
+        FloatP closest_t = dr::select(t1 < t2 && active1, t1, t2);
+        FloatP closest_u = dr::select(t1 < t2 && active1, u1, u2);
+        FloatP closest_v = dr::select(t1 < t2 && active1, v1, v2);
+        
+        // If it found an intersection, the resulting mask should always evaluate to true, t_value + uv-value 
+        // of the closest intersection is already handled above. Therefore just `active1 OR active2`.
+        dr::mask_t<FloatP>closest_mask = active1 || active2;
+
+        return { closest_t, { closest_u, closest_v }, closest_mask };
+    }
+
+
+    // TODO: merge scalar and vectorized versions!
+    /**
+     * Get world-space vertices of a heightfield tile (scalar mode)
+     * */
+    template <typename FloatP>
+    MI_INLINE void get_tile_vertices_scalar(ScalarIndex prim_index, Point<FloatP, 3>* vertices) const
+    {
+        float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
+
+        uint32_t amount_rows = m_res_x - 1;
+        uint32_t values_per_row = m_res_x;
+        uint32_t row_nr = dr::floor((float)prim_index / (float) amount_rows); // floor(prim_index / amount_bboxes_per_row)
+        uint32_t row_offset = prim_index % (amount_rows); // prim_index % amount_bboxes_per_row
+
+        // `(amount_rows - row_nr) * values_per_row` gives us the offset to get to the current row, we add the 
+        // row offset to this to get the absolute offset to obtain the corresponding texel of the
+        // current AABB (+ 1 in both dimensions to get right and top texels)  
+        uint32_t left_bottom_index = (amount_rows - row_nr) * values_per_row + row_offset;
+        uint32_t right_bottom_index = (amount_rows - row_nr) * values_per_row + row_offset + 1;
+        uint32_t left_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset;
+        uint32_t right_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset + 1;
+
+        // Compute the fractional bounds of the tile we're testing the intersection for
+        Point<FloatP, 2> local_min_target_bounds = Point<FloatP, 2>(-1.0f + (float)row_offset * cell_size[0], -1.0f + (float)row_nr * cell_size[1]);
+        Point<FloatP, 2> local_max_target_bounds = Point<FloatP, 2>(-1.0f + (float)(row_offset + 1) * cell_size[0], -1.0f + (float)(row_nr + 1) * cell_size[1]);
+
+        vertices[0] = m_to_world.scalar().transform_affine(Point<FloatP, 3>{local_min_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[left_top_index] * m_max_height.scalar()});
+        vertices[1] = m_to_world.scalar().transform_affine(Point<FloatP, 3>{local_min_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[left_bottom_index] * m_max_height.scalar()});
+        vertices[2] = m_to_world.scalar().transform_affine(Point<FloatP, 3>{local_max_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[right_bottom_index] * m_max_height.scalar()});
+        vertices[3] = m_to_world.scalar().transform_affine(Point<FloatP, 3>{local_max_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[right_top_index] * m_max_height.scalar()});      
 
     }
 
+    /**
+     * Get world-space vertices of a heightfield tile (vectorized mode)
+     * */
+       MI_INLINE void get_tile_vertices_vectorized(Index prim_index, Point<Float, 3>* vertices) const
+    {
+        float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
+
+        UInt32 amount_rows = m_res_x - 1;
+        UInt32 values_per_row = m_res_x;
+        UInt32 row_nr = dr::floor(prim_index / amount_rows); // floor(prim_index / amount_bboxes_per_row)
+        UInt32 row_offset = prim_index % (amount_rows); // prim_index % amount_bboxes_per_row
+
+        // `(amount_rows - row_nr) * values_per_row` gives us the offset to get to the current row, we add the 
+        // row offset to this to get the absolute offset to obtain the corresponding texel of the
+        // current AABB (+ 1 in both dimensions to get right and top texels)  
+        UInt32 left_bottom_index = (amount_rows - row_nr) * values_per_row + row_offset;
+        UInt32 right_bottom_index = (amount_rows - row_nr) * values_per_row + row_offset + 1;
+        UInt32 left_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset;
+        UInt32 right_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset + 1;
+
+        // Compute the fractional bounds of the tile we're testing the intersection for
+        Point<Float, 2> local_min_target_bounds = Point<Float, 2>(-1.0f + row_offset * cell_size[0], -1.0f + row_nr * cell_size[1]);
+        Point<Float, 2> local_max_target_bounds = Point<Float, 2>(-1.0f + (row_offset + 1) * cell_size[0], -1.0f + (row_nr + 1) * cell_size[1]);
+
+        vertices[0] = m_to_world.value().transform_affine(Point3f{local_min_target_bounds.x(), local_max_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), left_top_index) * m_max_height.scalar()});
+        vertices[1] = m_to_world.value().transform_affine(Point3f{local_min_target_bounds.x(), local_min_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), left_bottom_index) * m_max_height.scalar()});
+        vertices[2] = m_to_world.value().transform_affine(Point3f{local_max_target_bounds.x(), local_min_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), right_bottom_index) * m_max_height.scalar()});
+        vertices[3] = m_to_world.value().transform_affine(Point3f{local_max_target_bounds.x(), local_min_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), right_top_index) * m_max_height.scalar()});
+    }
+    
+    // ==========================================================================
+    // Debugging helper (Remove later)
+    // ==========================================================================
     MI_INLINE void print_heightfield_texture() const {
         for(uint32_t x = 0; x < m_res_x; x++)
         {
