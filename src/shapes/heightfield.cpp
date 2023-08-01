@@ -463,7 +463,6 @@ public:
         Transform4f to_object = m_to_object.value();
 
         SurfaceInteraction3f si = dr::zeros<SurfaceInteraction3f>();
-
         // if constexpr (IsDiff) {
 
         // } else {
@@ -484,14 +483,14 @@ public:
 
         Vector3f normal_t1 = dr::normalize(dr::cross(tile_vertices[1] - tile_vertices[0], tile_vertices[2] - tile_vertices[0]));
         Vector3f normal_t2 = dr::normalize(dr::cross(tile_vertices[0] - tile_vertices[3], tile_vertices[2] - tile_vertices[3]));
-        
+
         //  -------
         //  | \neg|
         //  |  \  |    Diagonal plane equation outcome mapping (positive --> triangle 1 / negative --> triangle 2)
         //  |pos\ |
         //  -------
-        si.n          = dr::select(above_or_below_diagonal_plane > 0, normal_t1, normal_t2 );
-        si.sh_frame.n = dr::select(above_or_below_diagonal_plane > 0, normal_t1, normal_t2);          // TODO: add shading normal for underlying triangles
+        si.n          = Vector3f{0.0f, 0.0f, 1.0f}; //dr::select(above_or_below_diagonal_plane > 0, normal_t1, normal_t2 );
+        si.sh_frame.n = Vector3f{0.0f, 0.0f, 1.0f}; //dr::select(above_or_below_diagonal_plane > 0, normal_t1, normal_t2);          // TODO: add shading normal for underlying triangles
         si.dp_du      = dr::zeros<Vector3f>();
         si.dp_dv      = dr::zeros<Vector3f>();
 
@@ -520,24 +519,21 @@ public:
         FloatP inv_det_t2 = dr::rcp(dr::dot(e1t2, pvec));
 
         Vector3fP tvec = ray.o - vertices[0];
-        FloatP u1 = dr::dot(tvec, pvec) * inv_det_t1;
-        FloatP u2 = dr::dot(tvec, pvec) * inv_det_t2;
-
+        FloatP t_p_dot = dr::dot(tvec, pvec);
+        FloatP u1 = t_p_dot * inv_det_t1;
+        FloatP u2 = t_p_dot * inv_det_t2;
         active1 &= u1 >= 0.f && u1 <= 1.f;
         active2 &= u2 >= 0.f && u2 <= 1.f;
 
         Vector3fP qvec1 = dr::cross(tvec, e1t1);
         Vector3fP qvec2 = dr::cross(tvec, e1t2);
-
         FloatP v1 = dr::dot(ray.d, qvec1) * inv_det_t1;
         FloatP v2 = dr::dot(ray.d, qvec2) * inv_det_t2;
-
         active1 &= v1 >= 0.f && u1 + v1 <= 1.f;
         active2 &= v2 >= 0.f && u2 + v2 <= 1.f;
 
         FloatP t1 = dr::dot(e2, qvec1) * inv_det_t1;
         FloatP t2 = dr::dot(e2, qvec2) * inv_det_t2;
-
         active1 &= t1 >= 0.f && t1 <= ray.maxt;
         active2 &= t2 >= 0.f && t2 <= ray.maxt;
 
@@ -595,7 +591,8 @@ public:
 
         UInt32 amount_rows = m_res_x - 1;
         UInt32 values_per_row = m_res_x;
-        UInt32 row_nr = dr::floor(prim_index / amount_rows); // floor(prim_index / amount_bboxes_per_row)
+        UInt32 row_nr = dr::floor((Float)prim_index / (Float)amount_rows); // floor(prim_index / amount_bboxes_per_row)
+
         UInt32 row_offset = prim_index % (amount_rows); // prim_index % amount_bboxes_per_row
 
         // `(amount_rows - row_nr) * values_per_row` gives us the offset to get to the current row, we add the 
@@ -641,7 +638,7 @@ public:
             if (!m_optix_data_ptr)
                 m_optix_data_ptr = jit_malloc(AllocType::Device, sizeof(OptixHeightfieldData));
 
-            OptixHeightfieldData data =  { m_to_object.scalar(), m_res_x, m_res_y, m_heightfield_texture.tensor().array().data(), m_max_height.scalar()};
+            OptixHeightfieldData data =  { m_to_world.scalar(), m_to_object.scalar(), m_res_x, m_res_y, m_heightfield_texture.tensor().array().data(), m_max_height.scalar()};
             jit_memcpy(JitBackend::CUDA, m_optix_data_ptr, &data, sizeof(OptixHeightfieldData));
         }
     }

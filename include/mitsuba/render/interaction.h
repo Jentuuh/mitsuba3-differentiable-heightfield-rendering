@@ -673,7 +673,6 @@ struct PreliminaryIntersection {
             }
 
             ScopedPhase sp(ProfilerPhase::CreateSurfaceInteraction);
-
             ShapePtr target = dr::select(dr::eq(instance, nullptr), shape, instance);
             SurfaceInteraction3f si =
                 target->compute_surface_interaction(ray, *this, ray_flags, 0u, active);

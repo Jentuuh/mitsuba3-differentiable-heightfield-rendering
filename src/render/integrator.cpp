@@ -299,7 +299,7 @@ SamplingIntegrator<Float, Spectrum>::render(Scene *scene,
         } else {
             film->schedule_storage();
         }
-
+        
         if (evaluate) {
             dr::eval();
 
