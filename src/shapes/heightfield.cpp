@@ -395,8 +395,6 @@ public:
         // Give closest intersection between two triangles (if any)              
         std::tie(t, uv , active_t) = moeller_trumbore_two_triangles(ray, tile_vertices);
          
-        // std::cout << t << std::endl;
-
         return { dr::select(active_t, t, dr::Infinity<FloatP>),
             Point<FloatP, 2>(uv.x(), uv.y()), ((uint32_t) -1), prim_index };
     }
@@ -423,7 +421,7 @@ public:
 
         FloatP t;
         Point<FloatP, 2> uv;
-        dr::mask_t<FloatP> active_t; // Tells us which lanes intersected with triangle 1
+        dr::mask_t<FloatP> active_t;
 
         // Triangle 1: Left top, left bottom, right bottom (0,1,2)
         // 0-------
@@ -442,8 +440,6 @@ public:
         // Give closest intersection between two triangles (if any)              
         std::tie(t, uv , active_t) = moeller_trumbore_two_triangles(ray, tile_vertices);
          
-
-        // Does ray intersect with any of the two triangles?
         return active_t;
     }
 
@@ -473,12 +469,8 @@ public:
         // } else {
         si.t = pi.t;
         si.p = ray(pi.t);
-            // // Re-project intersection point found along ray onto the heightfield to improve accuracy
-            // Point3f p = ray(pi.t);
-            // Float dist = dr::dot(to_world.translation() - p, m_frame.n);
-            // si.p = p + dist * m_frame.n;
         // }
-        
+
         // ==============================================
         // Compute which triangle we intersected with           TODO: We currently decided to do this on the fly, might be better to pass the index via prim_index, or add another return value to the tuple that's returned from `ray_intersect_preliminary_impl`
         // ==============================================
@@ -490,9 +482,9 @@ public:
         Float D = -(dr::dot(diag_normal, tile_vertices[0]));
         Float above_or_below_diagonal_plane = dr::dot(diag_normal, si.p) + D;
 
-        Vector3f normal_t1 = dr::cross(tile_vertices[0] - tile_vertices[1], tile_vertices[2] - tile_vertices[1]);
-        Vector3f normal_t2 = dr::cross(tile_vertices[0] - tile_vertices[3], tile_vertices[2] - tile_vertices[3]);
-
+        Vector3f normal_t1 = dr::normalize(dr::cross(tile_vertices[1] - tile_vertices[0], tile_vertices[2] - tile_vertices[0]));
+        Vector3f normal_t2 = dr::normalize(dr::cross(tile_vertices[0] - tile_vertices[3], tile_vertices[2] - tile_vertices[3]));
+        
         //  -------
         //  | \neg|
         //  |  \  |    Diagonal plane equation outcome mapping (positive --> triangle 1 / negative --> triangle 2)
@@ -526,7 +518,6 @@ public:
         Vector3fP pvec = dr::cross(ray.d, e2);
         FloatP inv_det_t1 = dr::rcp(dr::dot(e1t1, pvec));
         FloatP inv_det_t2 = dr::rcp(dr::dot(e1t2, pvec));
-
 
         Vector3fP tvec = ray.o - vertices[0];
         FloatP u1 = dr::dot(tvec, pvec) * inv_det_t1;
@@ -593,7 +584,6 @@ public:
         vertices[1] = m_to_world.scalar().transform_affine(Point<FloatP, 3>{local_min_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[left_bottom_index] * m_max_height.scalar()});
         vertices[2] = m_to_world.scalar().transform_affine(Point<FloatP, 3>{local_max_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[right_bottom_index] * m_max_height.scalar()});
         vertices[3] = m_to_world.scalar().transform_affine(Point<FloatP, 3>{local_max_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[right_top_index] * m_max_height.scalar()});      
-
     }
 
     /**
@@ -623,11 +613,11 @@ public:
         vertices[0] = m_to_world.value().transform_affine(Point3f{local_min_target_bounds.x(), local_max_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), left_top_index) * m_max_height.scalar()});
         vertices[1] = m_to_world.value().transform_affine(Point3f{local_min_target_bounds.x(), local_min_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), left_bottom_index) * m_max_height.scalar()});
         vertices[2] = m_to_world.value().transform_affine(Point3f{local_max_target_bounds.x(), local_min_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), right_bottom_index) * m_max_height.scalar()});
-        vertices[3] = m_to_world.value().transform_affine(Point3f{local_max_target_bounds.x(), local_min_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), right_top_index) * m_max_height.scalar()});
+        vertices[3] = m_to_world.value().transform_affine(Point3f{local_max_target_bounds.x(), local_max_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), right_top_index) * m_max_height.scalar()});
     }
     
     // ==========================================================================
-    // Debugging helper (Remove later)
+    // Debugging helper (Remove later) TODO
     // ==========================================================================
     MI_INLINE void print_heightfield_texture() const {
         for(uint32_t x = 0; x < m_res_x; x++)
