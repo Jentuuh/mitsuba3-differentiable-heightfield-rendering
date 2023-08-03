@@ -58,6 +58,9 @@ X- and Y-axes.
      not permitted! (Default: none, i.e. object space = world space)
    - |exposed|, |differentiable|, |discontinuous|
 
+ * - per_vertex_n
+   - |bool|
+   - Maximal height displacement of the heightfield. (Default = true);
 
 .. warning::
 
@@ -96,7 +99,14 @@ public:
     using InputPoint1f   = Point<InputFloat, 1>;
     using InputTensorXf  = dr::Tensor<DynamicBuffer<InputFloat>>;
     using Index = typename CoreAliases::UInt32;
-    
+
+    // Triangulation types
+    using InputPoint3f  = Point<float, 3>;
+    using InputVector2f = Vector<float, 2>;
+    using InputVector3f = Vector<float, 3>;
+    using InputNormal3f = Normal<float, 3>;
+    using FloatStorage = DynamicBuffer<dr::replace_scalar_t<Float, float>>;
+
     using typename Base::ScalarIndex;
     using typename Base::ScalarSize;
 
@@ -137,6 +147,12 @@ public:
                 InputTensorXf(default_data, 3, default_shape), true, false,
                 dr::FilterMode::Linear, dr::WrapMode::Clamp);
         }
+
+        // Per-vertex normal buffer
+        m_has_vertex_normals = props.get<bool>("per_vertex_n", true);
+        if (m_has_vertex_normals)
+            m_vertex_normals = dr::zeros<FloatStorage>((m_res_x * m_res_y) * 3);
+
         update();
         initialize();
     }
@@ -146,7 +162,7 @@ public:
         jit_free(m_device_bboxes);
     }
 
-    void update() {
+    void  update() {
         auto [S, Q, T] =
             dr::transform_decompose(m_to_world.scalar().matrix, 25);
         if (dr::abs(Q[0]) > 1e-6f || dr::abs(Q[1]) > 1e-6f ||
@@ -172,6 +188,10 @@ public:
                  m_device_bboxes,
                  m_amount_primitives) = build_bboxes();
 
+        // Update per-vertex normals
+        if (m_has_vertex_normals)
+            recompute_vertex_normals();
+
         mark_dirty();
     }
 
@@ -193,6 +213,7 @@ public:
 
             // Update heightfield texture
             m_heightfield_texture.set_tensor(m_heightfield_texture.tensor());
+
             update();
         }
 
@@ -360,6 +381,9 @@ public:
                                    ScalarIndex prim_index,
                                    dr::mask_t<FloatP> active) const {
         MI_MASK_ARGUMENT(active);
+        using Point2fP = Point<FloatP, 2>;
+        using Point3fP = Point<FloatP, 3>;
+
         // Corresponds to rectangle intersection, except that each voxel now has its own small rectangle 
         // to whose space we should transform the ray.
         Ray3fP ray;
@@ -371,11 +395,13 @@ public:
             ray = m_to_object.value().transform_affine(ray_);
         
          // 4 vertices of candidate heightfield tile 
-        Point<FloatP, 3> tile_vertices[4];
-        get_tile_vertices_scalar(prim_index, tile_vertices);
+        Point3fP t1[3];
+        Point3fP t2[3];
+
+        get_tile_vertices_scalar(prim_index, t1, t2);
 
         FloatP t;
-        Point<FloatP, 2> uv;
+        Point2fP uv;
         dr::mask_t<FloatP> active_t; // Tells us which lanes intersected with triangle 1
 
         // Triangle 1: Left top, left bottom, right bottom (0,1,2)
@@ -385,7 +411,7 @@ public:
         //  |   \ |
         // 1-------2
         //   
-        // Triangle 2: Right bottom, left top, Right top (2,0,3)
+        // Triangle 2: Right top , left top, right bottom (3,0,2)
         // 0-------3
         //  | \   |
         //  |  \  |
@@ -393,10 +419,10 @@ public:
         //  -------2
         
         // Give closest intersection between two triangles (if any)              
-        std::tie(t, uv , active_t) = moeller_trumbore_two_triangles(ray, tile_vertices);
+        std::tie(t, uv , active_t) = moeller_trumbore_two_triangles(ray, t1, t2);
          
         return { dr::select(active_t, t, dr::Infinity<FloatP>),
-            Point<FloatP, 2>(uv.x(), uv.y()), ((uint32_t) -1), prim_index };
+            Point2fP(uv.x(), uv.y()), ((uint32_t) -1), prim_index };
     }
 
 
@@ -404,7 +430,10 @@ public:
     dr::mask_t<FloatP> ray_test_impl(const Ray3fP &ray_,
                                      ScalarIndex prim_index,
                                      dr::mask_t<FloatP> active) const {
-        MI_MASK_ARGUMENT(active);    
+        MI_MASK_ARGUMENT(active);
+        using Point2fP = Point<FloatP, 2>;
+        using Point3fP = Point<FloatP, 3>;    
+        
         // Corresponds to rectangle intersection, except that each voxel now has its own rectangle 
         // to whose space we should transform the ray.
         Ray3fP ray;
@@ -416,11 +445,12 @@ public:
             ray = m_to_object.value().transform_affine(ray_);
 
         // 4 vertices of candidate heightfield tile 
-        Point<FloatP, 3> tile_vertices[4];
-        get_tile_vertices_scalar(prim_index, tile_vertices);
+        Point3fP t1[3];
+        Point3fP t2[3];
+        get_tile_vertices_scalar(prim_index, t1, t2);
 
         FloatP t;
-        Point<FloatP, 2> uv;
+        Point2fP uv;
         dr::mask_t<FloatP> active_t;
 
         // Triangle 1: Left top, left bottom, right bottom (0,1,2)
@@ -430,7 +460,7 @@ public:
         //  |   \ |
         // 1-------2
         //   
-        // Triangle 2: Right bottom, left top, Right top (2,0,3)
+        // Triangle 2: Right top , left top, right bottom (3,0,2)
         // 0-------3
         //  | \   |
         //  |  \  |
@@ -438,7 +468,7 @@ public:
         //  -------2
         
         // Give closest intersection between two triangles (if any)              
-        std::tie(t, uv , active_t) = moeller_trumbore_two_triangles(ray, tile_vertices);
+        std::tie(t, uv , active_t) = moeller_trumbore_two_triangles(ray, t1, t2);
          
         return active_t;
     }
@@ -450,17 +480,17 @@ public:
                                                      uint32_t recursion_depth,
                                                      Mask active) const override {
         MI_MASK_ARGUMENT(active);
-        constexpr bool IsDiff = dr::is_diff_v<Float>;
+        // constexpr bool IsDiff = dr::is_diff_v<Float>;
 
         // Early exit when tracing isn't necessary
         if (!m_is_instance && recursion_depth > 0)
             return dr::zeros<SurfaceInteraction3f>();
 
-        bool detach_shape = has_flag(ray_flags, RayFlags::DetachShape);
-        bool follow_shape = has_flag(ray_flags, RayFlags::FollowShape);
+        // bool detach_shape = has_flag(ray_flags, RayFlags::DetachShape);
+        // bool follow_shape = has_flag(ray_flags, RayFlags::FollowShape);
         
-        Transform4f to_world = m_to_world.value();
-        Transform4f to_object = m_to_object.value();
+        // Transform4f& to_world = m_to_world.value();
+        // Transform4f& to_object = m_to_object.value();
 
         SurfaceInteraction3f si = dr::zeros<SurfaceInteraction3f>();
         // if constexpr (IsDiff) {
@@ -469,28 +499,27 @@ public:
         si.t = pi.t;
         si.p = ray(pi.t);
         // }
+        si.prim_index = pi.prim_index;
+
+        Point3f t1[3];
+        Point3f t2[3];
+        get_tile_vertices_vectorized(pi.prim_index, t1, t2);
 
         // ==============================================
         // Compute which triangle we intersected with           TODO: We currently decided to do this on the fly, might be better to pass the index via prim_index, or add another return value to the tuple that's returned from `ray_intersect_preliminary_impl`
         // ==============================================
-        Point<Float, 3> tile_vertices[4];
-        get_tile_vertices_vectorized(pi.prim_index, tile_vertices);
+        Point3f* hit_tri;
+        Normal3f face_n; 
+        Normal3f interpolated_n;
+        std::tie(hit_tri, face_n, interpolated_n) = find_hit_triangle_and_normals(si, t1, t2, active);
+        
+        si.n          = face_n;
+        if(m_has_vertex_normals) {
+            si.sh_frame.n = interpolated_n;    
+        } else {
+            si.sh_frame.n = face_n;        
+        }
 
-        Vector3f diagonal = tile_vertices[0] - tile_vertices[2];
-        Vector3f diag_normal = dr::cross(diagonal, Vector3f{0.0f, -1.0f, 0.0f});
-        Float D = -(dr::dot(diag_normal, tile_vertices[0]));
-        Float above_or_below_diagonal_plane = dr::dot(diag_normal, si.p) + D;
-
-        Vector3f normal_t1 = dr::normalize(dr::cross(tile_vertices[1] - tile_vertices[0], tile_vertices[2] - tile_vertices[0]));
-        Vector3f normal_t2 = dr::normalize(dr::cross(tile_vertices[0] - tile_vertices[3], tile_vertices[2] - tile_vertices[3]));
-
-        //  -------
-        //  | \neg|
-        //  |  \  |    Diagonal plane equation outcome mapping (positive --> triangle 1 / negative --> triangle 2)
-        //  |pos\ |
-        //  -------
-        si.n          = Vector3f{0.0f, 0.0f, 1.0f}; //dr::select(above_or_below_diagonal_plane > 0, normal_t1, normal_t2 );
-        si.sh_frame.n = Vector3f{0.0f, 0.0f, 1.0f}; //dr::select(above_or_below_diagonal_plane > 0, normal_t1, normal_t2);          // TODO: add shading normal for underlying triangles
         si.dp_du      = dr::zeros<Vector3f>();
         si.dp_dv      = dr::zeros<Vector3f>();
 
@@ -504,7 +533,7 @@ public:
     }
     
     template <typename FloatP, typename Ray3fP>
-    MI_INLINE std::tuple<FloatP,  Point<FloatP, 2>, dr::mask_t<FloatP>> moeller_trumbore_two_triangles(const Ray3fP &ray, Point<FloatP, 3> vertices[4],
+    MI_INLINE std::tuple<FloatP,  Point<FloatP, 2>, dr::mask_t<FloatP>> moeller_trumbore_two_triangles(const Ray3fP &ray, Point<FloatP, 3> tri_1[3], Point<FloatP, 3> tri_2[3],
                                                                                                dr::mask_t<FloatP> active = true) const 
     {
         using Vector3fP = Vector<FloatP, 3>;
@@ -512,13 +541,13 @@ public:
         dr::mask_t<FloatP> active1 = active;
         dr::mask_t<FloatP> active2 = active;
 
-        Vector3fP e1t1 = vertices[1] - vertices[0], e1t2 = vertices[3] - vertices[0], e2 = vertices[2] - vertices[0];
+        Vector3fP e1t1 = tri_1[1] - tri_1[0], e1t2 = tri_2[0] - tri_2[1], e2 = tri_1[2] - tri_1[0];
 
         Vector3fP pvec = dr::cross(ray.d, e2);
         FloatP inv_det_t1 = dr::rcp(dr::dot(e1t1, pvec));
         FloatP inv_det_t2 = dr::rcp(dr::dot(e1t2, pvec));
 
-        Vector3fP tvec = ray.o - vertices[0];
+        Vector3fP tvec = ray.o - tri_1[0];
         FloatP t_p_dot = dr::dot(tvec, pvec);
         FloatP u1 = t_p_dot * inv_det_t1;
         FloatP u2 = t_p_dot * inv_det_t2;
@@ -555,8 +584,11 @@ public:
      * Get world-space vertices of a heightfield tile (scalar mode)
      * */
     template <typename FloatP>
-    MI_INLINE void get_tile_vertices_scalar(ScalarIndex prim_index, Point<FloatP, 3>* vertices) const
+    MI_INLINE void get_tile_vertices_scalar(ScalarIndex prim_index, Point<FloatP, 3>* t1, Point<FloatP, 3>* t2) const
     {
+        using Point2fP = Point<FloatP, 2>;
+        using Point3fP = Point<FloatP, 3>;
+
         float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
 
         uint32_t amount_rows = m_res_x - 1;
@@ -573,19 +605,22 @@ public:
         uint32_t right_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset + 1;
 
         // Compute the fractional bounds of the tile we're testing the intersection for
-        Point<FloatP, 2> local_min_target_bounds = Point<FloatP, 2>(-1.0f + (float)row_offset * cell_size[0], -1.0f + (float)row_nr * cell_size[1]);
-        Point<FloatP, 2> local_max_target_bounds = Point<FloatP, 2>(-1.0f + (float)(row_offset + 1) * cell_size[0], -1.0f + (float)(row_nr + 1) * cell_size[1]);
+        Point2fP local_min_target_bounds = Point2fP(-1.0f + (float)row_offset * cell_size[0], -1.0f + (float)row_nr * cell_size[1]);
+        Point2fP local_max_target_bounds = Point2fP(-1.0f + (float)(row_offset + 1) * cell_size[0], -1.0f + (float)(row_nr + 1) * cell_size[1]);
 
-        vertices[0] = m_to_world.scalar().transform_affine(Point<FloatP, 3>{local_min_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[left_top_index] * m_max_height.scalar()});
-        vertices[1] = m_to_world.scalar().transform_affine(Point<FloatP, 3>{local_min_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[left_bottom_index] * m_max_height.scalar()});
-        vertices[2] = m_to_world.scalar().transform_affine(Point<FloatP, 3>{local_max_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[right_bottom_index] * m_max_height.scalar()});
-        vertices[3] = m_to_world.scalar().transform_affine(Point<FloatP, 3>{local_max_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[right_top_index] * m_max_height.scalar()});      
+        t1[0] = m_to_world.scalar().transform_affine(Point3fP{local_min_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[left_top_index] * m_max_height.scalar()});
+        t1[1] = m_to_world.scalar().transform_affine(Point3fP{local_min_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[left_bottom_index] * m_max_height.scalar()});
+        t1[2] = m_to_world.scalar().transform_affine(Point3fP{local_max_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[right_bottom_index] * m_max_height.scalar()});
+
+        t2[0] = m_to_world.scalar().transform_affine(Point3fP{local_max_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[right_top_index] * m_max_height.scalar()});      
+        t2[1] = m_to_world.scalar().transform_affine(Point3fP{local_min_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[left_top_index] * m_max_height.scalar()});
+        t2[2] = m_to_world.scalar().transform_affine(Point3fP{local_max_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[right_bottom_index] * m_max_height.scalar()});
     }
 
     /**
      * Get world-space vertices of a heightfield tile (vectorized mode)
      * */
-       MI_INLINE void get_tile_vertices_vectorized(Index prim_index, Point<Float, 3>* vertices) const
+       MI_INLINE void get_tile_vertices_vectorized(Index prim_index, Point3f* t1, Point3f* t2) const
     {
         float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
 
@@ -604,31 +639,215 @@ public:
         UInt32 right_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset + 1;
 
         // Compute the fractional bounds of the tile we're testing the intersection for
-        Point<Float, 2> local_min_target_bounds = Point<Float, 2>(-1.0f + row_offset * cell_size[0], -1.0f + row_nr * cell_size[1]);
-        Point<Float, 2> local_max_target_bounds = Point<Float, 2>(-1.0f + (row_offset + 1) * cell_size[0], -1.0f + (row_nr + 1) * cell_size[1]);
+        Point2f local_min_target_bounds = Point2f(-1.0f + row_offset * cell_size[0], -1.0f + row_nr * cell_size[1]);
+        Point2f local_max_target_bounds = Point2f(-1.0f + (row_offset + 1) * cell_size[0], -1.0f + (row_nr + 1) * cell_size[1]);
+        
+        // 0 --> 1 --> 2
+        t1[0] = m_to_world.value().transform_affine(Point3f{local_min_target_bounds.x(), local_max_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), left_top_index) * m_max_height.scalar()});
+        t1[1] = m_to_world.value().transform_affine(Point3f{local_min_target_bounds.x(), local_min_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), left_bottom_index) * m_max_height.scalar()});
+        t1[2] = m_to_world.value().transform_affine(Point3f{local_max_target_bounds.x(), local_min_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), right_bottom_index) * m_max_height.scalar()});
 
-        vertices[0] = m_to_world.value().transform_affine(Point3f{local_min_target_bounds.x(), local_max_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), left_top_index) * m_max_height.scalar()});
-        vertices[1] = m_to_world.value().transform_affine(Point3f{local_min_target_bounds.x(), local_min_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), left_bottom_index) * m_max_height.scalar()});
-        vertices[2] = m_to_world.value().transform_affine(Point3f{local_max_target_bounds.x(), local_min_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), right_bottom_index) * m_max_height.scalar()});
-        vertices[3] = m_to_world.value().transform_affine(Point3f{local_max_target_bounds.x(), local_max_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), right_top_index) * m_max_height.scalar()});
+        // 3 --> 0 --> 2
+        t2[0] = m_to_world.value().transform_affine(Point3f{local_max_target_bounds.x(), local_max_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), right_top_index) * m_max_height.scalar()});
+        t2[1] = m_to_world.value().transform_affine(Point3f{local_min_target_bounds.x(), local_max_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), left_top_index) * m_max_height.scalar()});
+        t2[2] = m_to_world.value().transform_affine(Point3f{local_max_target_bounds.x(), local_min_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), right_bottom_index) * m_max_height.scalar()});
+    }
+
+
+    void recompute_vertex_normals() {
+        
+        /* Weighting scheme based on "Computing Vertex Normals from Polygonal Facets"
+       by Grit Thuermer and Charles A. Wuethrich, JGT 1998, Vol 3 */
+
+       uint32_t vertex_count = (m_res_x - 1) * (m_res_y - 1) * 6;
+
+        if constexpr (!dr::is_dynamic_v<Float>) {
+        size_t invalid_counter = 0;
+        std::vector<InputNormal3f> normals(vertex_count, dr::zeros<InputNormal3f>());
+
+            for(ScalarSize tile = 0; tile < ((m_res_x - 1) * (m_res_y - 1)); tile++){
+                InputPoint3f triangle1[3]; 
+                InputPoint3f triangle2[3];
+
+                get_tile_vertices_scalar(tile, triangle1, triangle2);
+                InputVector3f   side_0_t1 = triangle1[1] - triangle1[0],
+                                side_1_t1 = triangle1[2] - triangle1[0],
+                                side_0_t2 = triangle2[1] - triangle2[0],
+                                side_1_t2 = triangle2[2] - triangle2[0];
+
+                InputNormal3f n1 = dr::cross(side_0_t1, side_1_t1);
+                InputNormal3f n2 = dr::cross(side_0_t2, side_1_t2); 
+
+                // Normals triangle 1           TODO: put this into 1 helper function?
+                InputFloat length_sqr_n1 = dr::squared_norm(n1);
+                if (likely(length_sqr_n1 > 0)) {
+                    n1 *= dr::rsqrt(length_sqr_n1);
+
+                    auto side1 = transpose(dr::Array<dr::Packet<InputFloat, 3>, 3>{ side_0_t1, triangle1[2] - triangle1[1], triangle1[0] - triangle1[2] });
+                    auto side2 = transpose(dr::Array<dr::Packet<InputFloat, 3>, 3>{ side_1_t1, triangle1[0] - triangle1[1], triangle1[1] - triangle1[2] });
+                    InputVector3f face_angles = unit_angle(dr::normalize(side1), dr::normalize(side2));
+
+                    // Each tile represents 2 triangles and thus 6 normals
+                    for (size_t j = 0; j < 3; ++j)
+                    {  
+                        normals[tile * 2 * 3 + j] += n1 * face_angles[j];
+                    }
+                }
+
+                // Normals triangle 2
+                InputFloat length_sqr_n2 = dr::squared_norm(n2);
+                if (likely(length_sqr_n2 > 0)) {
+                    n2 *= dr::rsqrt(length_sqr_n2);
+
+                    auto side1 = transpose(dr::Array<dr::Packet<InputFloat, 3>, 3>{ side_0_t2, triangle2[2] - triangle2[1], triangle2[0] - triangle2[2] });
+                    auto side2 = transpose(dr::Array<dr::Packet<InputFloat, 3>, 3>{ side_1_t2, triangle2[0] - triangle2[1], triangle2[1] - triangle2[2] });
+                    InputVector3f face_angles = unit_angle(dr::normalize(side1), dr::normalize(side2));
+
+                    // Each tile represents 2 triangles and thus 6 normals
+                    for (size_t j = 0; j < 3; ++j)
+                        normals[tile * 2 * 3 + (3 + j)] += n2 * face_angles[j];
+                }
+            }
+            
+            // Normalize all normals
+            for (ScalarSize i = 0; i < vertex_count; i++) {
+                InputNormal3f n = normals[i];
+                InputFloat length = dr::norm(n);
+                if (likely(length != 0.f)) {
+                    n /= length;
+                } else {
+                    n = InputNormal3f(1, 0, 0); // Choose some bogus value
+                    invalid_counter++;
+                }
+
+                normals[i] = n;
+
+                // TODO: Why does this not work?!
+                //dr::store(m_vertex_normals.data() + 3 * i, n);
+            }
+            m_vertex_normals = dr::load<FloatStorage>(normals.data(), vertex_count * 3);
+
+
+            if (invalid_counter > 0)
+                Log(Warn, "Heightfield: computed vertex normals (%i invalid vertices!)",
+                    invalid_counter);
+        } else {
+            // The following is JITed into two separate kernel launches
+
+            // --------------------- Kernel 1 starts here ---------------------
+            UInt32 tile_index = dr::arange<UInt32>((m_res_x - 1) * (m_res_y - 1));
+
+            Point3f triangle1[3];
+            Point3f triangle2[3];
+            get_tile_vertices_vectorized(tile_index, triangle1, triangle2);
+
+            Vector3f n1 = dr::normalize(dr::cross(triangle1[1] - triangle1[0], triangle1[2] - triangle1[0]));
+            Vector3f n2 = dr::normalize(dr::cross(triangle2[1] - triangle2[0], triangle2[2] - triangle2[0]));
+
+            Vector3f normals = dr::zeros<Vector3f>(vertex_count);
+
+            //  Normals triangle 1
+            for (int i = 0; i < 3; ++i) {
+                Vector3f d0 = dr::normalize(triangle1[(i + 1) % 3] - triangle1[i]);
+                Vector3f d1 = dr::normalize(triangle1[(i + 2) % 3] - triangle1[i]);
+                Float face_angle = dr::safe_acos(dr::dot(d0, d1));
+
+                Vector3f nn = n1 * face_angle;
+                for (int j = 0; j < 3; ++j)
+                    dr::scatter_reduce(ReduceOp::Add, normals[j], nn[j], tile_index * 2 * 3 + (3 + j));
+            }
+
+            // Normals triangle 2
+            for (int i = 0; i < 3; ++i) {
+                Vector3f d0 = dr::normalize(triangle2[(i + 1) % 3] - triangle2[i]);
+                Vector3f d1 = dr::normalize(triangle2[(i + 2) % 3] - triangle2[i]);
+                Float face_angle = dr::safe_acos(dr::dot(d0, d1));
+
+                Vector3f nn = n2 * face_angle;
+                for (int j = 0; j < 3; ++j)
+                    dr::scatter_reduce(ReduceOp::Add, normals[j], nn[j], tile_index * 2 * 3 + (3 + j));
+            }
+
+
+            // --------------------- Kernel 2 starts here ---------------------
+
+            normals = dr::normalize(normals);
+
+            // Disconnect the vertex normal buffer from any pre-existing AD
+            // graph. Otherwise an AD graph might be unnecessarily retained
+            // here, despite the following lines re-initializing the normals.
+            dr::disable_grad(m_vertex_normals);
+
+            UInt32 ni = dr::arange<UInt32>(vertex_count) * 3;
+            for (size_t i = 0; i < 3; ++i)
+                dr::scatter(m_vertex_normals,
+                            dr::float32_array_t<Float>(normals[i]), ni + i);
+
+            dr::eval(m_vertex_normals);
+        }
+    }   
+
+    std::tuple<Point3f*, Normal3f, Normal3f> find_hit_triangle_and_normals(const SurfaceInteraction3f &si,
+                                                                            Point3f* t1, Point3f* t2,
+                                                                            Mask active) const {    
+
+        Vector3f diagonal = t1[2] - t1[0];
+        Vector3f diag_normal = dr::cross(diagonal, Vector3f{0.0f, -1.0f, 0.0f});
+        Float D = -(dr::dot(diag_normal, t1[0]));
+        Float above_or_below_diagonal_plane = dr::dot(diag_normal, si.p) + D;
+
+        //  -------
+        //  | \neg|
+        //  |  \  |    Diagonal plane equation outcome mapping (positive --> triangle 1 / negative --> triangle 2)
+        //  |pos\ |
+        //  -------
+
+        Point3f hit_tri[3];
+        hit_tri[0] = dr::select(above_or_below_diagonal_plane > 0 && active, t1[0], t2[0]);
+        hit_tri[1] = dr::select(above_or_below_diagonal_plane > 0 && active, t1[1], t2[1]);
+        hit_tri[2] = dr::select(above_or_below_diagonal_plane > 0 && active, t1[2], t2[2]);
+
+        Vector3f rel = si.p - hit_tri[0],
+                du  = hit_tri[1] - hit_tri[0],
+                dv  = hit_tri[2] - hit_tri[0];
+
+        /* Solve a least squares problem to determine
+        the UV coordinates within the current triangle */
+        Float b1  = dr::dot(du, rel), b2 = dr::dot(dv, rel),
+            a11 = dr::dot(du, du), a12 = dr::dot(du, dv),
+            a22 = dr::dot(dv, dv),
+            inv_det = dr::rcp(a11 * a22 - a12 * a12);
+
+        Float u = dr::fmsub (a22, b1, a12 * b2) * inv_det,
+            v = dr::fnmadd(a12, b1, a11 * b2) * inv_det,
+            w = 1.f - u - v;
+
+        
+        // Face normal
+        Normal3f tri_face_n = dr::normalize(dr::cross(hit_tri[1] - hit_tri[0], hit_tri[2] - hit_tri[0]));
+        
+        // Barycentric-interpolated normal
+        Normal3f tri_interpolated_n; 
+        if(m_has_vertex_normals){
+            Normal3f normal_a = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(si.prim_index * 6 + 0), vertex_normal(si.prim_index * 6 + 3));
+            Normal3f normal_b = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(si.prim_index * 6 + 1), vertex_normal(si.prim_index * 6 + 4));
+            Normal3f normal_c = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(si.prim_index * 6 + 2), vertex_normal(si.prim_index * 6 + 5));
+
+            // tri_interpolated_n = w * normal_a + u * normal_b + v * normal_c;
+            tri_interpolated_n = w * normal_a + u * normal_b + v * normal_c;
+        }
+
+
+        return { hit_tri, tri_face_n, tri_interpolated_n };
+    }
+
+    template <typename Index>
+    MI_INLINE auto vertex_normal(Index index,
+                                 dr::mask_t<Index> active = true) const {
+        using Result = Normal<dr::replace_scalar_t<Index, InputFloat>, 3>;
+        return dr::gather<Result>(m_vertex_normals, index, active);
     }
     
-    // ==========================================================================
-    // Debugging helper (Remove later) TODO
-    // ==========================================================================
-    MI_INLINE void print_heightfield_texture() const {
-        for(uint32_t x = 0; x < m_res_x; x++)
-        {
-            std::cout << "------------------------------------------------" << std::endl;
-            for(uint32_t y = 0; y < m_res_y; y++)
-            {
-                std::cout <<"| " << (m_heightfield_texture.tensor().data())[x * m_res_x + y] << " |";
-            }
-        }
-        std::cout << "------------------------------------------------" << std::endl;
-
-    }
-    // ==============================================================================
 
 #if defined(MI_ENABLE_CUDA)
     using Base::m_optix_data_ptr;
@@ -705,6 +924,12 @@ private:
     // Device-visible bounding boxes
     // Only valid for CUDA variants
     void *m_device_bboxes = nullptr;
+
+
+    bool m_has_vertex_normals;
+
+    // Per vertex normals of triangulated heightfield
+    FloatStorage m_vertex_normals; 
 
     size_t m_amount_primitives = 0;
 };
