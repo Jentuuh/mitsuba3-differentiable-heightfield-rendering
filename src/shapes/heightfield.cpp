@@ -520,7 +520,7 @@ public:
         get_tile_vertices_vectorized(pi.prim_index, t1, t2, indices);
         
         Vector3f diagonal = t1[2] - t1[0];
-        Vector3f diag_normal = dr::cross(diagonal, Vector3f{0.0f, -1.0f, 0.0f});
+        Vector3f diag_normal = dr::cross(diagonal, Vector3f{0.0f, 0.0f, -1.0f});
         Float D = -(dr::dot(diag_normal, t1[0]));
         Float above_or_below_diagonal_plane = dr::dot(diag_normal, si.p) + D;
 
@@ -541,10 +541,8 @@ public:
             auto normal_c = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[2]), vertex_normal(indices[2]));
 
             Normal3f n = dr::fmadd(normal_c, b2, dr::fmadd(normal_b, b1, normal_a * b0));
-            Float il = dr::rsqrt(dr::squared_norm(n));
-            n *= il;
 
-            si.sh_frame.n = n;     
+            si.sh_frame.n = dr::normalize(n);     
         } else {
             si.sh_frame.n = si.n;         
         }
@@ -734,8 +732,9 @@ public:
                 Vector3u indices_t1 = Vector3u{indices[0], indices[1], indices[2]}; // Store indices for triangle 2 in separate vector to allow easy indexing in loop
                 Vector3u indices_t2 = Vector3u{indices[3], indices[0], indices[2]}; // Store indices for triangle 2 in separate vector to allow easy indexing in loop
                 
-                update_vertex_normals_scalar(triangle1, normals, indices_t1); // Triangle 1
-                update_vertex_normals_scalar(triangle2, normals, indices_t2); // Triangle 2
+                // Apply angle weighting scheme for both triangles in tile
+                update_vertex_normals_scalar(triangle1, normals, indices_t1); 
+                update_vertex_normals_scalar(triangle2, normals, indices_t2);
             }
             
             // Normalize all normals
@@ -807,16 +806,6 @@ public:
 
             for (size_t j = 0; j < 3; ++j)
                 vertex_normals[indices[j]] += face_normal * face_angles[j];
-                
-            // std::cout << "triangle: " << triangle[0] << ";" << triangle[1] << ";" << triangle[2] << face_normal << std::endl;
-
-            // InputFloat length_sqr_n = dr::squared_norm(face_normal);
-            // if (likely(length_sqr_n > 0)) {
-            //     face_normal *= dr::rsqrt(length_sqr_n);
-            //     std::cout << face_normal << std::endl;
-
-   
-            // }
         }  
     }
 
