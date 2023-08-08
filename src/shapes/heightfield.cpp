@@ -397,8 +397,8 @@ public:
          // 4 vertices of candidate heightfield tile 
         Point3fP t1[3];
         Point3fP t2[3];
-
-        get_tile_vertices_scalar(prim_index, t1, t2);
+        Vector4u indices;
+        get_tile_vertices_scalar(prim_index, t1, t2, indices);
 
         FloatP t;
         Point2fP uv;
@@ -447,7 +447,8 @@ public:
         // 4 vertices of candidate heightfield tile 
         Point3fP t1[3];
         Point3fP t2[3];
-        get_tile_vertices_scalar(prim_index, t1, t2);
+        Vector4u indices;
+        get_tile_vertices_scalar(prim_index, t1, t2, indices);
 
         FloatP t;
         Point2fP uv;
@@ -499,25 +500,53 @@ public:
         si.t = pi.t;
         si.p = ray(pi.t);
         // }
-        si.prim_index = pi.prim_index;
 
-        Point3f t1[3];
-        Point3f t2[3];
-        get_tile_vertices_vectorized(pi.prim_index, t1, t2);
+        // Barycentric coords
+        Float b1 = pi.prim_uv.x(),
+        b2 = pi.prim_uv.y(),
+        b0 = 1.f - b1 - b2;
 
         // ==============================================
         // Compute which triangle we intersected with           TODO: We currently decided to do this on the fly, might be better to pass the index via prim_index, or add another return value to the tuple that's returned from `ray_intersect_preliminary_impl`
         // ==============================================
-        Point3f* hit_tri;
-        Normal3f face_n; 
-        Normal3f interpolated_n;
-        std::tie(hit_tri, face_n, interpolated_n) = find_hit_triangle_and_normals(si, t1, t2, active);
+        //  -------
+        //  | \neg|
+        //  |  \  |    Diagonal plane equation outcome mapping (positive --> triangle 1 / negative --> triangle 2)
+        //  |pos\ |
+        //  -------
+        Point3f t1[3];
+        Point3f t2[3];
+        Vector4u indices;
+        get_tile_vertices_vectorized(pi.prim_index, t1, t2, indices);
         
-        si.n          = face_n;
+        Vector3f diagonal = t1[2] - t1[0];
+        Vector3f diag_normal = dr::cross(diagonal, Vector3f{0.0f, -1.0f, 0.0f});
+        Float D = -(dr::dot(diag_normal, t1[0]));
+        Float above_or_below_diagonal_plane = dr::dot(diag_normal, si.p) + D;
+
+        Point3f hit_tri[3];
+        hit_tri[0] = dr::select(above_or_below_diagonal_plane > 0, t1[0], t2[0]);
+        hit_tri[1] = dr::select(above_or_below_diagonal_plane > 0, t1[1], t2[1]);
+        hit_tri[2] = dr::select(above_or_below_diagonal_plane > 0, t1[2], t2[2]);
+
+        // Re-interpolate intersection using barycentric coordinates
+        si.p = dr::fmadd(hit_tri[0], b0, dr::fmadd(hit_tri[1], b1, hit_tri[2] * b2));
+
+        // Compute normals 
+        si.n  = dr::normalize(dr::cross(hit_tri[1] - hit_tri[0], hit_tri[2] - hit_tri[0]));
+
         if(m_has_vertex_normals) {
-            si.sh_frame.n = interpolated_n;    
+            auto normal_a = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[0]), vertex_normal(indices[3]));
+            auto normal_b = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[1]), vertex_normal(indices[0]));
+            auto normal_c = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[2]), vertex_normal(indices[2]));
+
+            Normal3f n = dr::fmadd(normal_c, b2, dr::fmadd(normal_b, b1, normal_a * b0));
+            Float il = dr::rsqrt(dr::squared_norm(n));
+            n *= il;
+
+            si.sh_frame.n = n;     
         } else {
-            si.sh_frame.n = face_n;        
+            si.sh_frame.n = si.n;         
         }
 
         si.dp_du      = dr::zeros<Vector3f>();
@@ -541,32 +570,34 @@ public:
         dr::mask_t<FloatP> active1 = active;
         dr::mask_t<FloatP> active2 = active;
 
-        Vector3fP e1t1 = tri_1[1] - tri_1[0], e1t2 = tri_2[0] - tri_2[1], e2 = tri_1[2] - tri_1[0];
+        Vector3fP e1t1 = tri_1[1] - tri_1[0], e1t2 = tri_2[1] - tri_2[0], e2t1 = tri_1[2] - tri_1[0], e2t2 = tri_2[2] - tri_2[0];
 
-        Vector3fP pvec = dr::cross(ray.d, e2);
-        FloatP inv_det_t1 = dr::rcp(dr::dot(e1t1, pvec));
-        FloatP inv_det_t2 = dr::rcp(dr::dot(e1t2, pvec));
+        Vector3fP pvec_t1 = dr::cross(ray.d, e2t1);
+        Vector3fP pvec_t2 = dr::cross(ray.d, e2t2);
+        FloatP inv_det_t1 = dr::rcp(dr::dot(e1t1, pvec_t1));
+        FloatP inv_det_t2 = dr::rcp(dr::dot(e1t2, pvec_t2));
 
-        Vector3fP tvec = ray.o - tri_1[0];
-        FloatP t_p_dot = dr::dot(tvec, pvec);
-        FloatP u1 = t_p_dot * inv_det_t1;
-        FloatP u2 = t_p_dot * inv_det_t2;
+        Vector3fP tvec_t1 = ray.o - tri_1[0];
+        Vector3fP tvec_t2 = ray.o - tri_2[0];
+
+        FloatP u1 = dr::dot(tvec_t1, pvec_t1) * inv_det_t1;  // ok
+        FloatP u2 = dr::dot(tvec_t2, pvec_t2) * inv_det_t2;  
         active1 &= u1 >= 0.f && u1 <= 1.f;
         active2 &= u2 >= 0.f && u2 <= 1.f;
 
-        Vector3fP qvec1 = dr::cross(tvec, e1t1);
-        Vector3fP qvec2 = dr::cross(tvec, e1t2);
+        Vector3fP qvec1 = dr::cross(tvec_t1, e1t1);
+        Vector3fP qvec2 = dr::cross(tvec_t2, e1t2);
         FloatP v1 = dr::dot(ray.d, qvec1) * inv_det_t1;
         FloatP v2 = dr::dot(ray.d, qvec2) * inv_det_t2;
         active1 &= v1 >= 0.f && u1 + v1 <= 1.f;
         active2 &= v2 >= 0.f && u2 + v2 <= 1.f;
 
-        FloatP t1 = dr::dot(e2, qvec1) * inv_det_t1;
-        FloatP t2 = dr::dot(e2, qvec2) * inv_det_t2;
+        FloatP t1 = dr::dot(e2t1, qvec1) * inv_det_t1;
+        FloatP t2 = dr::dot(e2t2, qvec2) * inv_det_t2;
         active1 &= t1 >= 0.f && t1 <= ray.maxt;
         active2 &= t2 >= 0.f && t2 <= ray.maxt;
 
-        // Select the closest triangle (if any intersection was found, this is covered by `closest_mask`)
+        // Select the closest triangle (if any intersection was found, this is covered by `closest_mask` below)
         FloatP closest_t = dr::select(t1 < t2 && active1, t1, t2);
         FloatP closest_u = dr::select(t1 < t2 && active1, u1, u2);
         FloatP closest_v = dr::select(t1 < t2 && active1, v1, v2);
@@ -582,9 +613,27 @@ public:
     // TODO: merge scalar and vectorized versions!
     /**
      * Get world-space vertices of a heightfield tile (scalar mode)
+     * Tile indexing example (indexing starts on the left bottom of the grid,
+     * goes lef):
+     * 
+     * x == -1        x == 1
+     * 
+     * ^                ^
+     * |                |
+     * |                |
+     * ------------------ --> y == 1
+     * |    |     |     |
+     * | 6  | 7   | 8   |
+     * |----------------|
+     * |    |     |     |
+     * | 3  | 4   | 5   |
+     * |----------------|
+     * |    |     |     |
+     * | 0  | 1   | 2   |
+     * ------------------ --> y == -1
      * */
     template <typename FloatP>
-    MI_INLINE void get_tile_vertices_scalar(ScalarIndex prim_index, Point<FloatP, 3>* t1, Point<FloatP, 3>* t2) const
+    MI_INLINE void get_tile_vertices_scalar(ScalarIndex prim_index, Point<FloatP, 3>* t1, Point<FloatP, 3>* t2, Vector4u& idx) const
     {
         using Point2fP = Point<FloatP, 2>;
         using Point3fP = Point<FloatP, 3>;
@@ -592,9 +641,10 @@ public:
         float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
 
         uint32_t amount_rows = m_res_x - 1;
+        uint32_t amount_bboxes_per_row = m_res_y - 1;
         uint32_t values_per_row = m_res_x;
-        uint32_t row_nr = dr::floor((float)prim_index / (float) amount_rows); // floor(prim_index / amount_bboxes_per_row)
-        uint32_t row_offset = prim_index % (amount_rows); // prim_index % amount_bboxes_per_row
+        uint32_t row_nr = dr::floor((float)prim_index / (float) amount_bboxes_per_row); // floor(prim_index / amount_bboxes_per_row)
+        uint32_t row_offset = prim_index % (amount_bboxes_per_row); // prim_index % amount_bboxes_per_row
 
         // `(amount_rows - row_nr) * values_per_row` gives us the offset to get to the current row, we add the 
         // row offset to this to get the absolute offset to obtain the corresponding texel of the
@@ -608,27 +658,34 @@ public:
         Point2fP local_min_target_bounds = Point2fP(-1.0f + (float)row_offset * cell_size[0], -1.0f + (float)row_nr * cell_size[1]);
         Point2fP local_max_target_bounds = Point2fP(-1.0f + (float)(row_offset + 1) * cell_size[0], -1.0f + (float)(row_nr + 1) * cell_size[1]);
 
+        // 0 --> 1 --> 2
         t1[0] = m_to_world.scalar().transform_affine(Point3fP{local_min_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[left_top_index] * m_max_height.scalar()});
         t1[1] = m_to_world.scalar().transform_affine(Point3fP{local_min_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[left_bottom_index] * m_max_height.scalar()});
         t1[2] = m_to_world.scalar().transform_affine(Point3fP{local_max_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[right_bottom_index] * m_max_height.scalar()});
 
+        // 3 --> 0 --> 2
         t2[0] = m_to_world.scalar().transform_affine(Point3fP{local_max_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[right_top_index] * m_max_height.scalar()});      
         t2[1] = m_to_world.scalar().transform_affine(Point3fP{local_min_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[left_top_index] * m_max_height.scalar()});
         t2[2] = m_to_world.scalar().transform_affine(Point3fP{local_max_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[right_bottom_index] * m_max_height.scalar()});
+        
+        idx[0]= left_top_index;
+        idx[1]= left_bottom_index;
+        idx[2]= right_bottom_index;
+        idx[3]= right_top_index;
     }
 
     /**
      * Get world-space vertices of a heightfield tile (vectorized mode)
      * */
-       MI_INLINE void get_tile_vertices_vectorized(Index prim_index, Point3f* t1, Point3f* t2) const
+       MI_INLINE void get_tile_vertices_vectorized(Index prim_index, Point3f* t1, Point3f* t2, Vector4u& idx) const
     {
         float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
 
         UInt32 amount_rows = m_res_x - 1;
+        UInt32 amount_bboxes_per_row = m_res_y - 1;
         UInt32 values_per_row = m_res_x;
-        UInt32 row_nr = dr::floor((Float)prim_index / (Float)amount_rows); // floor(prim_index / amount_bboxes_per_row)
-
-        UInt32 row_offset = prim_index % (amount_rows); // prim_index % amount_bboxes_per_row
+        UInt32 row_nr = dr::floor((Float)prim_index / (Float)amount_bboxes_per_row); // floor(prim_index / amount_bboxes_per_row)
+        UInt32 row_offset = prim_index % (amount_bboxes_per_row); // prim_index % amount_bboxes_per_row
 
         // `(amount_rows - row_nr) * values_per_row` gives us the offset to get to the current row, we add the 
         // row offset to this to get the absolute offset to obtain the corresponding texel of the
@@ -651,6 +708,11 @@ public:
         t2[0] = m_to_world.value().transform_affine(Point3f{local_max_target_bounds.x(), local_max_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), right_top_index) * m_max_height.scalar()});
         t2[1] = m_to_world.value().transform_affine(Point3f{local_min_target_bounds.x(), local_max_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), left_top_index) * m_max_height.scalar()});
         t2[2] = m_to_world.value().transform_affine(Point3f{local_max_target_bounds.x(), local_min_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), right_bottom_index) * m_max_height.scalar()});
+        
+        idx[0]= left_top_index;
+        idx[1]= left_bottom_index;
+        idx[2]= right_bottom_index;
+        idx[3]= right_top_index;
     }
 
 
@@ -658,61 +720,29 @@ public:
         
         /* Weighting scheme based on "Computing Vertex Normals from Polygonal Facets"
        by Grit Thuermer and Charles A. Wuethrich, JGT 1998, Vol 3 */
-
-       uint32_t vertex_count = (m_res_x - 1) * (m_res_y - 1) * 6;
+       uint32_t vertex_count = m_res_x * m_res_y;
 
         if constexpr (!dr::is_dynamic_v<Float>) {
         size_t invalid_counter = 0;
         std::vector<InputNormal3f> normals(vertex_count, dr::zeros<InputNormal3f>());
 
-            for(ScalarSize tile = 0; tile < ((m_res_x - 1) * (m_res_y - 1)); tile++){
+            for(ScalarSize tile = 0; tile < (m_res_x - 1) * (m_res_y - 1); tile++){
                 InputPoint3f triangle1[3]; 
                 InputPoint3f triangle2[3];
-
-                get_tile_vertices_scalar(tile, triangle1, triangle2);
-                InputVector3f   side_0_t1 = triangle1[1] - triangle1[0],
-                                side_1_t1 = triangle1[2] - triangle1[0],
-                                side_0_t2 = triangle2[1] - triangle2[0],
-                                side_1_t2 = triangle2[2] - triangle2[0];
-
-                InputNormal3f n1 = dr::cross(side_0_t1, side_1_t1);
-                InputNormal3f n2 = dr::cross(side_0_t2, side_1_t2); 
-
-                // Normals triangle 1           TODO: put this into 1 helper function?
-                InputFloat length_sqr_n1 = dr::squared_norm(n1);
-                if (likely(length_sqr_n1 > 0)) {
-                    n1 *= dr::rsqrt(length_sqr_n1);
-
-                    auto side1 = transpose(dr::Array<dr::Packet<InputFloat, 3>, 3>{ side_0_t1, triangle1[2] - triangle1[1], triangle1[0] - triangle1[2] });
-                    auto side2 = transpose(dr::Array<dr::Packet<InputFloat, 3>, 3>{ side_1_t1, triangle1[0] - triangle1[1], triangle1[1] - triangle1[2] });
-                    InputVector3f face_angles = unit_angle(dr::normalize(side1), dr::normalize(side2));
-
-                    // Each tile represents 2 triangles and thus 6 normals
-                    for (size_t j = 0; j < 3; ++j)
-                    {  
-                        normals[tile * 2 * 3 + j] += n1 * face_angles[j];
-                    }
-                }
-
-                // Normals triangle 2
-                InputFloat length_sqr_n2 = dr::squared_norm(n2);
-                if (likely(length_sqr_n2 > 0)) {
-                    n2 *= dr::rsqrt(length_sqr_n2);
-
-                    auto side1 = transpose(dr::Array<dr::Packet<InputFloat, 3>, 3>{ side_0_t2, triangle2[2] - triangle2[1], triangle2[0] - triangle2[2] });
-                    auto side2 = transpose(dr::Array<dr::Packet<InputFloat, 3>, 3>{ side_1_t2, triangle2[0] - triangle2[1], triangle2[1] - triangle2[2] });
-                    InputVector3f face_angles = unit_angle(dr::normalize(side1), dr::normalize(side2));
-
-                    // Each tile represents 2 triangles and thus 6 normals
-                    for (size_t j = 0; j < 3; ++j)
-                        normals[tile * 2 * 3 + (3 + j)] += n2 * face_angles[j];
-                }
+                Vector4u indices;
+                get_tile_vertices_scalar(tile, triangle1, triangle2, indices);
+                Vector3u indices_t1 = Vector3u{indices[0], indices[1], indices[2]}; // Store indices for triangle 2 in separate vector to allow easy indexing in loop
+                Vector3u indices_t2 = Vector3u{indices[3], indices[0], indices[2]}; // Store indices for triangle 2 in separate vector to allow easy indexing in loop
+                
+                update_vertex_normals_scalar(triangle1, normals, indices_t1); // Triangle 1
+                update_vertex_normals_scalar(triangle2, normals, indices_t2); // Triangle 2
             }
             
             // Normalize all normals
             for (ScalarSize i = 0; i < vertex_count; i++) {
                 InputNormal3f n = normals[i];
                 InputFloat length = dr::norm(n);
+
                 if (likely(length != 0.f)) {
                     n /= length;
                 } else {
@@ -720,13 +750,8 @@ public:
                     invalid_counter++;
                 }
 
-                normals[i] = n;
-
-                // TODO: Why does this not work?!
-                //dr::store(m_vertex_normals.data() + 3 * i, n);
+                dr::store(m_vertex_normals.data() + 3 * i, n);
             }
-            m_vertex_normals = dr::load<FloatStorage>(normals.data(), vertex_count * 3);
-
 
             if (invalid_counter > 0)
                 Log(Warn, "Heightfield: computed vertex normals (%i invalid vertices!)",
@@ -739,38 +764,17 @@ public:
 
             Point3f triangle1[3];
             Point3f triangle2[3];
-            get_tile_vertices_vectorized(tile_index, triangle1, triangle2);
-
-            Vector3f n1 = dr::normalize(dr::cross(triangle1[1] - triangle1[0], triangle1[2] - triangle1[0]));
-            Vector3f n2 = dr::normalize(dr::cross(triangle2[1] - triangle2[0], triangle2[2] - triangle2[0]));
-
+            Vector4u indices;
+            get_tile_vertices_vectorized(tile_index, triangle1, triangle2, indices);
+            Vector3u indices_t1 = Vector3u{indices[0], indices[1], indices[2]}; // Store indices for triangle 2 in separate vector to allow easy indexing in loop
+            Vector3u indices_t2 = Vector3u{indices[3], indices[0], indices[2]}; // Store indices for triangle 2 in separate vector to allow easy indexing in loop
+    
             Vector3f normals = dr::zeros<Vector3f>(vertex_count);
 
-            //  Normals triangle 1
-            for (int i = 0; i < 3; ++i) {
-                Vector3f d0 = dr::normalize(triangle1[(i + 1) % 3] - triangle1[i]);
-                Vector3f d1 = dr::normalize(triangle1[(i + 2) % 3] - triangle1[i]);
-                Float face_angle = dr::safe_acos(dr::dot(d0, d1));
-
-                Vector3f nn = n1 * face_angle;
-                for (int j = 0; j < 3; ++j)
-                    dr::scatter_reduce(ReduceOp::Add, normals[j], nn[j], tile_index * 2 * 3 + (3 + j));
-            }
-
-            // Normals triangle 2
-            for (int i = 0; i < 3; ++i) {
-                Vector3f d0 = dr::normalize(triangle2[(i + 1) % 3] - triangle2[i]);
-                Vector3f d1 = dr::normalize(triangle2[(i + 2) % 3] - triangle2[i]);
-                Float face_angle = dr::safe_acos(dr::dot(d0, d1));
-
-                Vector3f nn = n2 * face_angle;
-                for (int j = 0; j < 3; ++j)
-                    dr::scatter_reduce(ReduceOp::Add, normals[j], nn[j], tile_index * 2 * 3 + (3 + j));
-            }
-
+            update_vertex_normals_vectorized(triangle1, normals, indices_t1);
+            update_vertex_normals_vectorized(triangle2, normals, indices_t2);
 
             // --------------------- Kernel 2 starts here ---------------------
-
             normals = dr::normalize(normals);
 
             // Disconnect the vertex normal buffer from any pre-existing AD
@@ -787,58 +791,50 @@ public:
         }
     }   
 
-    std::tuple<Point3f*, Normal3f, Normal3f> find_hit_triangle_and_normals(const SurfaceInteraction3f &si,
-                                                                            Point3f* t1, Point3f* t2,
-                                                                            Mask active) const {    
 
-        Vector3f diagonal = t1[2] - t1[0];
-        Vector3f diag_normal = dr::cross(diagonal, Vector3f{0.0f, -1.0f, 0.0f});
-        Float D = -(dr::dot(diag_normal, t1[0]));
-        Float above_or_below_diagonal_plane = dr::dot(diag_normal, si.p) + D;
+    // TODO: Merge scalar and vectorized versions into 1 helper function? 
+    void update_vertex_normals_scalar(InputPoint3f* triangle, std::vector<InputNormal3f>& vertex_normals, Vector3u& indices)
+    {
+        if constexpr (!dr::is_dynamic_v<Float>) {
+            InputVector3f   side_0 = triangle[1] - triangle[0],
+                            side_1 = triangle[2] - triangle[0];
+            InputNormal3f face_normal = dr::normalize(dr::cross(side_0, side_1));
+            
+            // Vectorize side pairs to compute simultaneously
+            auto side1 = transpose(dr::Array<dr::Packet<InputFloat, 3>, 3>{ side_0, triangle[2] - triangle[1], triangle[0] - triangle[2] });
+            auto side2 = transpose(dr::Array<dr::Packet<InputFloat, 3>, 3>{ side_1, triangle[0] - triangle[1], triangle[1] - triangle[2] });
+            InputVector3f face_angles = unit_angle(dr::normalize(side1), dr::normalize(side2));
 
-        //  -------
-        //  | \neg|
-        //  |  \  |    Diagonal plane equation outcome mapping (positive --> triangle 1 / negative --> triangle 2)
-        //  |pos\ |
-        //  -------
+            for (size_t j = 0; j < 3; ++j)
+                vertex_normals[indices[j]] += face_normal * face_angles[j];
+                
+            // std::cout << "triangle: " << triangle[0] << ";" << triangle[1] << ";" << triangle[2] << face_normal << std::endl;
 
-        Point3f hit_tri[3];
-        hit_tri[0] = dr::select(above_or_below_diagonal_plane > 0 && active, t1[0], t2[0]);
-        hit_tri[1] = dr::select(above_or_below_diagonal_plane > 0 && active, t1[1], t2[1]);
-        hit_tri[2] = dr::select(above_or_below_diagonal_plane > 0 && active, t1[2], t2[2]);
+            // InputFloat length_sqr_n = dr::squared_norm(face_normal);
+            // if (likely(length_sqr_n > 0)) {
+            //     face_normal *= dr::rsqrt(length_sqr_n);
+            //     std::cout << face_normal << std::endl;
 
-        Vector3f rel = si.p - hit_tri[0],
-                du  = hit_tri[1] - hit_tri[0],
-                dv  = hit_tri[2] - hit_tri[0];
+   
+            // }
+        }  
+    }
 
-        /* Solve a least squares problem to determine
-        the UV coordinates within the current triangle */
-        Float b1  = dr::dot(du, rel), b2 = dr::dot(dv, rel),
-            a11 = dr::dot(du, du), a12 = dr::dot(du, dv),
-            a22 = dr::dot(dv, dv),
-            inv_det = dr::rcp(a11 * a22 - a12 * a12);
+    void update_vertex_normals_vectorized(Point3f* triangle, Vector3f& vertex_normals, Vector3u& indices)
+    {
+        if constexpr (dr::is_dynamic_v<Float>) {
+            Vector3f face_normal = dr::normalize(dr::cross(triangle[1] - triangle[0], triangle[2] - triangle[0]));
 
-        Float u = dr::fmsub (a22, b1, a12 * b2) * inv_det,
-            v = dr::fnmadd(a12, b1, a11 * b2) * inv_det,
-            w = 1.f - u - v;
+            for (int i = 0; i < 3; ++i) {
+                Vector3f d0 = dr::normalize(triangle[(i + 1) % 3] - triangle[i]);
+                Vector3f d1 = dr::normalize(triangle[(i + 2) % 3] - triangle[i]);
+                Float face_angle = dr::safe_acos(dr::dot(d0, d1));
 
-        
-        // Face normal
-        Normal3f tri_face_n = dr::normalize(dr::cross(hit_tri[1] - hit_tri[0], hit_tri[2] - hit_tri[0]));
-        
-        // Barycentric-interpolated normal
-        Normal3f tri_interpolated_n; 
-        if(m_has_vertex_normals){
-            Normal3f normal_a = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(si.prim_index * 6 + 0), vertex_normal(si.prim_index * 6 + 3));
-            Normal3f normal_b = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(si.prim_index * 6 + 1), vertex_normal(si.prim_index * 6 + 4));
-            Normal3f normal_c = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(si.prim_index * 6 + 2), vertex_normal(si.prim_index * 6 + 5));
-
-            // tri_interpolated_n = w * normal_a + u * normal_b + v * normal_c;
-            tri_interpolated_n = w * normal_a + u * normal_b + v * normal_c;
+                Vector3f nn = face_normal * face_angle;
+                for (int j = 0; j < 3; ++j)
+                    dr::scatter_reduce(ReduceOp::Add, vertex_normals[j], nn[j], indices[j]);
+            }
         }
-
-
-        return { hit_tri, tri_face_n, tri_interpolated_n };
     }
 
     template <typename Index>

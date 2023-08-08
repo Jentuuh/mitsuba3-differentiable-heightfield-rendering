@@ -49,28 +49,30 @@ __device__ IntersectResult moeller_trumbore_two_triangles(const Ray3f &ray, Vect
     bool intersect_t1_found = true;
     bool intersect_t2_found = true;
 
-    Vector3f e1t1 = vertices[1] - vertices[0], e1t2 = vertices[3] - vertices[0], e2 = vertices[2] - vertices[0];
+    Vector3f e1t1 = vertices[1] - vertices[0], e1t2 = vertices[0] - vertices[3], e2t1 = vertices[2] - vertices[0], e2t2 = vertices[2] - vertices[3];
 
-    Vector3f pvec = cross(ray.d, e2);
-    float inv_det_t1 = 1.0f / dot(e1t1, pvec);
-    float inv_det_t2 = 1.0f / dot(e1t2, pvec);
+    Vector3f pvec_t1 = cross(ray.d, e2t1);
+    Vector3f pvec_t2 = cross(ray.d, e2t2);
+    float inv_det_t1 = 1.0f / dot(e1t1, pvec_t1);
+    float inv_det_t2 = 1.0f / dot(e1t2, pvec_t1);
 
-    Vector3f tvec = ray.o - vertices[0];
-    float t_p_dot = dot(tvec, pvec);
-    float u1 = t_p_dot * inv_det_t1;
-    float u2 = t_p_dot * inv_det_t2;
+    Vector3f tvec_t1 = ray.o - vertices[0];
+    Vector3f tvec_t2 = ray.o - vertices[3];
+
+    float u1 = dot(tvec_t1, pvec_t1) * inv_det_t1;
+    float u2 = dot(tvec_t2, pvec_t2) * inv_det_t2;
     intersect_t1_found &= u1 >= 0.0f && u1 <= 1.0f;
     intersect_t2_found &= u2 >= 0.0f && u2 <= 1.0f;
 
-    Vector3f qvec1 = cross(tvec, e1t1);
-    Vector3f qvec2 = cross(tvec, e1t2);
+    Vector3f qvec1 = cross(tvec_t1, e1t1);
+    Vector3f qvec2 = cross(tvec_t2, e1t2);
     float v1 = dot(ray.d, qvec1) * inv_det_t1;
     float v2 = dot(ray.d, qvec2) * inv_det_t2;
     intersect_t1_found &= v1 >= 0.0f && u1 + v1 <= 1.0f;
     intersect_t2_found &= v2 >= 0.0f && u2 + v2 <= 1.0f;
 
-    float t1 = dot(e2, qvec1) * inv_det_t1;
-    float t2 = dot(e2, qvec2) * inv_det_t2;
+    float t1 = dot(e2t1, qvec1) * inv_det_t1;
+    float t2 = dot(e2t2, qvec2) * inv_det_t2;
     intersect_t1_found &= t1 >= 0.f && t1 <= ray.maxt;
     intersect_t2_found &= t2 >= 0.f && t2 <= ray.maxt;
 
