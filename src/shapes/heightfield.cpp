@@ -40,7 +40,7 @@ X- and Y-axes.
 
  * - filename
    - |string|
-   - Name of the file that stores the heightfield.
+   - Name of the heightfield texture that stores the heightfield.
    - |exposed|
 
  * - max_height
@@ -165,7 +165,7 @@ public:
     void  update() {
         auto [S, Q, T] =
             dr::transform_decompose(m_to_world.scalar().matrix, 25);
-        if (dr::abs(Q[0]) > 1e-6f || dr::abs(Q[1]) > 1e-6f ||
+        if (dr::abs(Q[0]) > 1e-6f || dr::abs(Q[1]) > 1e-6f ||               // TODO: Remove this? (I am not sure why rotations wouldn't be allowed for a triangulated heightfield)
             dr::abs(Q[2]) > 1e-6f || dr::abs(Q[3] - 1) > 1e-6f)
             Log(Warn, "'to_world' transform shouldn't perform any rotations, "
                       "use instancing (`shapegroup` and `instance` plugins) "
@@ -221,20 +221,16 @@ public:
     }
 
 
-    /* \brief Computes AABBs for all heightfield cells (a heightfield cell 
+    /* \brief Computes AABBs for all heightfield tiles (a heightfield tile 
      * implicitly contains a surface inside). Returns a pointer to the array 
      * of AABBs, a pointer to an array of cell indices of the former AABBs and the
      * amount of AABBs that were initialized.
      */
     std::tuple<void *, void *, size_t> build_bboxes() {
-        auto shape = m_heightfield_texture.tensor().shape();    
-        float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
-        
-        // Bbox count is shape[d] - 1 because our tensor data represents heightfield values at cell corners
-        // (4 heightfield texels form 1 heightfield cell)
+        // Bbox count is (m_res_x - 1) * (m_res_y - 1) because our tensor data represents heightfield values 
+        // at tile corners. (4 input texture texels form 1 heightfield tile)
         size_t max_bbox_count =
-            (shape[0] - 1) * (shape[1] - 1);
-        ScalarTransform4f to_world = m_to_world.scalar();
+            (m_res_x - 1) * (m_res_y - 1);
 
         float *grid = nullptr;
         
@@ -258,34 +254,21 @@ public:
         BoundingBoxType *host_aabbs = (BoundingBoxType *) jit_malloc(
         AllocType::Host, sizeof(BoundingBoxType) * max_bbox_count);
 
+
+        // Loop over heightfield tiles and build AABB for each
+        ScalarPoint3f tri_1[3];
+        ScalarPoint3f tri_2[3];
+        Vector4u indices;
         size_t count = 0;
-        // Loop over heightfield texels and build AABB for each
-        for (size_t y = shape[0] - 1; y > 0; --y) {
-            for (size_t x = 0; x < shape[1] - 1; ++x) {
-                
-                // TODO: unreadable point computation code, see how we can rewrite this
-
-                ScalarBoundingBox3f bbox;
-                // 00 (left bottom)
-                bbox.expand(to_world.transform_affine(ScalarPoint3f(       
-                    -1.0f + ((x + 0) * cell_size[1]), - 1.0f + (((shape[0] - 1) - (y - 0)) * cell_size[0]), 
-                        m_max_height.scalar() * grid[(y - 0) * shape[0] + (x + 0)])));
-                // 01 (left top)
-                bbox.expand(to_world.transform_affine(ScalarPoint3f(
-                        -1.0f + ((x + 0) * cell_size[1]), -1.0f + (((shape[0] - 1) - (y - 1)) * cell_size[0]), 
-                        m_max_height.scalar() * grid[(y - 1) * shape[0] + (x + 0)])));
-                // 10 (right bottom)
-                bbox.expand(to_world.transform_affine(ScalarPoint3f(
-                        -1.0f + ((x + 1) * cell_size[1]), -1.0f + (((shape[0] - 1) - (y - 0)) * cell_size[0]), 
-                        m_max_height.scalar() * grid[(y - 0) * shape[0] + (x + 1)])));
-                // 11 (right top)
-                bbox.expand(to_world.transform_affine(ScalarPoint3f(
-                        -1.0f + ((x + 1) * cell_size[1]), -1.0f + (((shape[0] - 1) - (y - 1)) * cell_size[0]), 
-                        m_max_height.scalar() * grid[(y - 1) * shape[0] + (x + 1)])));
-
-                host_aabbs[count] = BoundingBoxType(bbox);
-                count++;
-            }
+        for (size_t tile = 0; tile < max_bbox_count; tile++) {
+            ScalarBoundingBox3f bbox;
+            get_tile_vertices_scalar(tile, tri_1, tri_2, indices);
+            bbox.expand(tri_1[0]); // Left top vertex
+            bbox.expand(tri_1[1]); // Left bottom vertex
+            bbox.expand(tri_1[2]); // Right bottom vertex
+            bbox.expand(tri_2[0]); // Left top vertex
+            host_aabbs[count] = BoundingBoxType(bbox);
+            count++;
         }
 
         // Upload to device (if applicable)
@@ -318,7 +301,11 @@ public:
         bbox.expand(to_world.transform_affine(ScalarPoint3f(-1.f,  1.f, 0.f)));
         bbox.expand(to_world.transform_affine(ScalarPoint3f( 1.f, -1.f, 0.f)));
         bbox.expand(to_world.transform_affine(ScalarPoint3f( 1.f,  1.f, 0.f)));
-        bbox.expand(to_world.transform_affine(ScalarPoint3f( 0.f,  0.f, m_max_height.scalar())));
+
+        bbox.expand(to_world.transform_affine(ScalarPoint3f(-1.f, -1.f, m_max_height.scalar())));
+        bbox.expand(to_world.transform_affine(ScalarPoint3f(-1.f,  1.f, m_max_height.scalar())));
+        bbox.expand(to_world.transform_affine(ScalarPoint3f( 1.f, -1.f, m_max_height.scalar())));
+        bbox.expand(to_world.transform_affine(ScalarPoint3f( 1.f,  1.f, m_max_height.scalar())));
         return bbox;
     }
 
@@ -383,72 +370,12 @@ public:
         MI_MASK_ARGUMENT(active);
         using Point2fP = Point<FloatP, 2>;
         using Point3fP = Point<FloatP, 3>;
-
-        // Corresponds to rectangle intersection, except that each voxel now has its own small rectangle 
-        // to whose space we should transform the ray.
-        Ray3fP ray;
-
-        // Transform ray to local space
-        if constexpr (!dr::is_jit_v<FloatP>)
-            ray = m_to_object.scalar().transform_affine(ray_);
-        else
-            ray = m_to_object.value().transform_affine(ray_);
         
          // 4 vertices of candidate heightfield tile 
         Point3fP t1[3];
         Point3fP t2[3];
         Vector4u indices;
-        get_tile_vertices_scalar(prim_index, t1, t2, indices);
-
-        FloatP t;
-        Point2fP uv;
-        dr::mask_t<FloatP> active_t; // Tells us which lanes intersected with triangle 1
-
-        // Triangle 1: Left top, left bottom, right bottom (0,1,2)
-        // 0-------
-        //  | \   |
-        //  |  \  |
-        //  |   \ |
-        // 1-------2
-        //   
-        // Triangle 2: Right top , left top, right bottom (3,0,2)
-        // 0-------3
-        //  | \   |
-        //  |  \  |
-        //  |   \ |
-        //  -------2
-        
-        // Give closest intersection between two triangles (if any)              
-        std::tie(t, uv , active_t) = moeller_trumbore_two_triangles(ray, t1, t2);
-         
-        return { dr::select(active_t, t, dr::Infinity<FloatP>),
-            Point2fP(uv.x(), uv.y()), ((uint32_t) -1), prim_index };
-    }
-
-
-    template <typename FloatP, typename Ray3fP>
-    dr::mask_t<FloatP> ray_test_impl(const Ray3fP &ray_,
-                                     ScalarIndex prim_index,
-                                     dr::mask_t<FloatP> active) const {
-        MI_MASK_ARGUMENT(active);
-        using Point2fP = Point<FloatP, 2>;
-        using Point3fP = Point<FloatP, 3>;    
-        
-        // Corresponds to rectangle intersection, except that each voxel now has its own rectangle 
-        // to whose space we should transform the ray.
-        Ray3fP ray;
-
-        // Transform ray to local space
-        if constexpr (!dr::is_jit_v<FloatP>)
-            ray = m_to_object.scalar().transform_affine(ray_);
-        else
-            ray = m_to_object.value().transform_affine(ray_);
-
-        // 4 vertices of candidate heightfield tile 
-        Point3fP t1[3];
-        Point3fP t2[3];
-        Vector4u indices;
-        get_tile_vertices_scalar(prim_index, t1, t2, indices);
+        get_tile_vertices_scalar_packet(prim_index, t1, t2, indices);
 
         FloatP t;
         Point2fP uv;
@@ -469,7 +396,47 @@ public:
         //  -------2
         
         // Give closest intersection between two triangles (if any)              
-        std::tie(t, uv , active_t) = moeller_trumbore_two_triangles(ray, t1, t2);
+        std::tie(t, uv , active_t) = moeller_trumbore_two_triangles(ray_, t1, t2);
+         
+        return { dr::select(active_t, t, dr::Infinity<FloatP>),
+            Point2fP(uv.x(), uv.y()), ((uint32_t) -1), prim_index };
+    }
+
+
+    template <typename FloatP, typename Ray3fP>
+    dr::mask_t<FloatP> ray_test_impl(const Ray3fP &ray_,
+                                     ScalarIndex prim_index,
+                                     dr::mask_t<FloatP> active) const {
+        MI_MASK_ARGUMENT(active);
+        using Point2fP = Point<FloatP, 2>;
+        using Point3fP = Point<FloatP, 3>;   
+
+        // 4 vertices of candidate heightfield tile 
+        Point3fP t1[3];
+        Point3fP t2[3];
+        Vector4u indices;
+        get_tile_vertices_scalar_packet(prim_index, t1, t2, indices);
+
+        FloatP t;
+        Point2fP uv;
+        dr::mask_t<FloatP> active_t;
+
+        // Triangle 1: Left top, left bottom, right bottom (0,1,2)
+        // 0-------
+        //  | \   |
+        //  |  \  |
+        //  |   \ |
+        // 1-------2
+        //   
+        // Triangle 2: Right top , left top, right bottom (3,0,2)
+        // 0-------3
+        //  | \   |
+        //  |  \  |
+        //  |   \ |
+        //  -------2
+        
+        // Give closest intersection between two triangles (if any)              
+        std::tie(t, uv , active_t) = moeller_trumbore_two_triangles(ray_, t1, t2);
          
         return active_t;
     }
@@ -481,7 +448,7 @@ public:
                                                      uint32_t recursion_depth,
                                                      Mask active) const override {
         MI_MASK_ARGUMENT(active);
-        // constexpr bool IsDiff = dr::is_diff_v<Float>;
+        constexpr bool IsDiff = dr::is_diff_v<Float>;
 
         // Early exit when tracing isn't necessary
         if (!m_is_instance && recursion_depth > 0)
@@ -494,11 +461,13 @@ public:
         // Transform4f& to_object = m_to_object.value();
 
         SurfaceInteraction3f si = dr::zeros<SurfaceInteraction3f>();
+
+        Float t = pi.t;
+        si.p = ray(pi.t);
+
         // if constexpr (IsDiff) {
 
         // } else {
-        si.t = pi.t;
-        si.p = ray(pi.t);
         // }
 
         // Barycentric coords
@@ -532,27 +501,56 @@ public:
         // Re-interpolate intersection using barycentric coordinates
         si.p = dr::fmadd(hit_tri[0], b0, dr::fmadd(hit_tri[1], b1, hit_tri[2] * b2));
 
-        // Compute normals 
+        // Potentially recompute the distance traveled to the surface interaction hit point
+        if (IsDiff && has_flag(ray_flags, RayFlags::FollowShape))
+            t = dr::sqrt(dr::squared_norm(si.p - ray.o) / dr::squared_norm(ray.d));
+
+        si.t = dr::select(active, t, dr::Infinity<Float>);
+
+        // Face normal 
         si.n  = dr::normalize(dr::cross(hit_tri[1] - hit_tri[0], hit_tri[2] - hit_tri[0]));
 
+        // Shading normals
+        Normal3f n0, n1, n2;
         if(m_has_vertex_normals) {
-            auto normal_a = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[0]), vertex_normal(indices[3]));
-            auto normal_b = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[1]), vertex_normal(indices[0]));
-            auto normal_c = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[2]), vertex_normal(indices[2]));
 
-            Normal3f n = dr::fmadd(normal_c, b2, dr::fmadd(normal_b, b1, normal_a * b0));
+            if (IsDiff && has_flag(ray_flags, RayFlags::DetachShape)) {
+                n0 = dr::detach<true>(n0);
+                n1 = dr::detach<true>(n1);
+                n2 = dr::detach<true>(n2);
+            }
 
-            si.sh_frame.n = dr::normalize(n);     
+            n0 = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[0]), vertex_normal(indices[3]));
+            n1 = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[1]), vertex_normal(indices[0]));
+            n2 = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[2]), vertex_normal(indices[2]));
+
+            Normal3f n = dr::fmadd(n2, b2, dr::fmadd(n1, b1, n0 * b0));
+
+            si.sh_frame.n = dr::normalize(n);
+
+            // TODO: is this computation correct for the heightfield as well (copied from mesh.cpp)?
+            if (has_flag(ray_flags, RayFlags::dNSdUV)) {
+            /* Now compute the derivative of "normalize(u*n1 + v*n2 + (1-u-v)*n0)"
+               with respect to [u, v] in the local triangle parameterization.
+
+               Since d/du [f(u)/|f(u)|] = [d/du f(u)]/|f(u)|
+                   - f(u)/|f(u)|^3 <f(u), d/du f(u)>, this results in
+            */
+            si.dn_du = dr::normalize(n1 - n0);
+            si.dn_dv = dr::normalize(n2 - n0);
+
+            si.dn_du = dr::fnmadd(n, dr::dot(n, si.dn_du), si.dn_du);
+            si.dn_dv = dr::fnmadd(n, dr::dot(n, si.dn_dv), si.dn_dv);
+            } else {
+                si.dn_du = si.dn_dv = dr::zeros<Vector3f>();
+            }     
         } else {
             si.sh_frame.n = si.n;         
         }
 
         si.dp_du      = dr::zeros<Vector3f>();
         si.dp_dv      = dr::zeros<Vector3f>();
-
-        si.t = dr::select(active, si.t, dr::Infinity<Float>);
         
-        si.dn_du = si.dn_dv = dr::zeros<Vector3f>();
         si.shape    = this;
         si.instance = nullptr;
 
@@ -631,7 +629,7 @@ public:
      * ------------------ --> y == -1
      * */
     template <typename FloatP>
-    MI_INLINE void get_tile_vertices_scalar(ScalarIndex prim_index, Point<FloatP, 3>* t1, Point<FloatP, 3>* t2, Vector4u& idx) const
+    MI_INLINE void get_tile_vertices_scalar_packet(ScalarIndex prim_index, Point<FloatP, 3>* t1, Point<FloatP, 3>* t2, Vector4u& idx) const
     {
         using Point2fP = Point<FloatP, 2>;
         using Point3fP = Point<FloatP, 3>;
@@ -665,6 +663,44 @@ public:
         t2[0] = m_to_world.scalar().transform_affine(Point3fP{local_max_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[right_top_index] * m_max_height.scalar()});      
         t2[1] = m_to_world.scalar().transform_affine(Point3fP{local_min_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[left_top_index] * m_max_height.scalar()});
         t2[2] = m_to_world.scalar().transform_affine(Point3fP{local_max_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[right_bottom_index] * m_max_height.scalar()});
+        
+        idx[0]= left_top_index;
+        idx[1]= left_bottom_index;
+        idx[2]= right_bottom_index;
+        idx[3]= right_top_index;
+    }
+
+    MI_INLINE void get_tile_vertices_scalar(ScalarIndex prim_index, ScalarPoint3f* t1, ScalarPoint3f* t2, Vector4u& idx) const
+    {
+        float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
+
+        uint32_t amount_rows = m_res_x - 1;
+        uint32_t amount_bboxes_per_row = m_res_y - 1;
+        uint32_t values_per_row = m_res_x;
+        uint32_t row_nr = dr::floor((float)prim_index / (float) amount_bboxes_per_row); // floor(prim_index / amount_bboxes_per_row)
+        uint32_t row_offset = prim_index % (amount_bboxes_per_row); // prim_index % amount_bboxes_per_row
+
+        // `(amount_rows - row_nr) * values_per_row` gives us the offset to get to the current row, we add the 
+        // row offset to this to get the absolute offset to obtain the corresponding texel of the
+        // current AABB (+ 1 in both dimensions to get right and top texels)  
+        uint32_t left_bottom_index = (amount_rows - row_nr) * values_per_row + row_offset;
+        uint32_t right_bottom_index = (amount_rows - row_nr) * values_per_row + row_offset + 1;
+        uint32_t left_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset;
+        uint32_t right_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset + 1;
+
+        // Compute the fractional bounds of the tile we're testing the intersection for
+        ScalarPoint2f local_min_target_bounds = ScalarPoint2f(-1.0f + (float)row_offset * cell_size[0], -1.0f + (float)row_nr * cell_size[1]);
+        ScalarPoint2f local_max_target_bounds = ScalarPoint2f(-1.0f + (float)(row_offset + 1) * cell_size[0], -1.0f + (float)(row_nr + 1) * cell_size[1]);
+
+        // 0 --> 1 --> 2
+        t1[0] = m_to_world.scalar().transform_affine(ScalarPoint3f{local_min_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[left_top_index] * m_max_height.scalar()});
+        t1[1] = m_to_world.scalar().transform_affine(ScalarPoint3f{local_min_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[left_bottom_index] * m_max_height.scalar()});
+        t1[2] = m_to_world.scalar().transform_affine(ScalarPoint3f{local_max_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[right_bottom_index] * m_max_height.scalar()});
+
+        // 3 --> 0 --> 2
+        t2[0] = m_to_world.scalar().transform_affine(ScalarPoint3f{local_max_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[right_top_index] * m_max_height.scalar()});      
+        t2[1] = m_to_world.scalar().transform_affine(ScalarPoint3f{local_min_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[left_top_index] * m_max_height.scalar()});
+        t2[2] = m_to_world.scalar().transform_affine(ScalarPoint3f{local_max_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[right_bottom_index] * m_max_height.scalar()});
         
         idx[0]= left_top_index;
         idx[1]= left_bottom_index;
@@ -728,7 +764,7 @@ public:
                 InputPoint3f triangle1[3]; 
                 InputPoint3f triangle2[3];
                 Vector4u indices;
-                get_tile_vertices_scalar(tile, triangle1, triangle2, indices);
+                get_tile_vertices_scalar_packet(tile, triangle1, triangle2, indices);
                 Vector3u indices_t1 = Vector3u{indices[0], indices[1], indices[2]}; // Store indices for triangle 2 in separate vector to allow easy indexing in loop
                 Vector3u indices_t2 = Vector3u{indices[3], indices[0], indices[2]}; // Store indices for triangle 2 in separate vector to allow easy indexing in loop
                 
