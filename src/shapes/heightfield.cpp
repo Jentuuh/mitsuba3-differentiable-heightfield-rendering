@@ -179,6 +179,7 @@ public:
         m_to_object = m_to_world.value().inverse();
 
         if constexpr (!dr::is_cuda_v<Float>) {
+            dr::eval(m_heightfield_texture.value()); // Make sure the heightfield data is evaluated
             m_host_grid_data = m_heightfield_texture.tensor().data();
         }
 
@@ -254,15 +255,14 @@ public:
         BoundingBoxType *host_aabbs = (BoundingBoxType *) jit_malloc(
         AllocType::Host, sizeof(BoundingBoxType) * max_bbox_count);
 
-
         // Loop over heightfield tiles and build AABB for each
+        size_t count = 0;
         ScalarPoint3f tri_1[3];
         ScalarPoint3f tri_2[3];
         Vector4u indices;
-        size_t count = 0;
         for (size_t tile = 0; tile < max_bbox_count; tile++) {
             ScalarBoundingBox3f bbox;
-            get_tile_vertices_scalar(tile, tri_1, tri_2, indices);
+            get_tile_vertices_scalar(tile, tri_1, tri_2, indices, grid);
             bbox.expand(tri_1[0]); // Left top vertex
             bbox.expand(tri_1[1]); // Left bottom vertex
             bbox.expand(tri_1[2]); // Right bottom vertex
@@ -273,7 +273,6 @@ public:
 
         // Upload to device (if applicable)
         void *device_aabbs = nullptr;
-
         if constexpr (dr::is_cuda_v<Float>) {
             device_aabbs =
                 jit_malloc(AllocType::Device, sizeof(BoundingBoxType) * count);
@@ -370,7 +369,7 @@ public:
         MI_MASK_ARGUMENT(active);
         using Point2fP = Point<FloatP, 2>;
         using Point3fP = Point<FloatP, 3>;
-        
+
          // 4 vertices of candidate heightfield tile 
         Point3fP t1[3];
         Point3fP t2[3];
@@ -380,20 +379,6 @@ public:
         FloatP t;
         Point2fP uv;
         dr::mask_t<FloatP> active_t;
-
-        // Triangle 1: Left top, left bottom, right bottom (0,1,2)
-        // 0-------
-        //  | \   |
-        //  |  \  |
-        //  |   \ |
-        // 1-------2
-        //   
-        // Triangle 2: Right top , left top, right bottom (3,0,2)
-        // 0-------3
-        //  | \   |
-        //  |  \  |
-        //  |   \ |
-        //  -------2
         
         // Give closest intersection between two triangles (if any)              
         std::tie(t, uv , active_t) = moeller_trumbore_two_triangles(ray_, t1, t2);
@@ -420,20 +405,6 @@ public:
         FloatP t;
         Point2fP uv;
         dr::mask_t<FloatP> active_t;
-
-        // Triangle 1: Left top, left bottom, right bottom (0,1,2)
-        // 0-------
-        //  | \   |
-        //  |  \  |
-        //  |   \ |
-        // 1-------2
-        //   
-        // Triangle 2: Right top , left top, right bottom (3,0,2)
-        // 0-------3
-        //  | \   |
-        //  |  \  |
-        //  |   \ |
-        //  -------2
         
         // Give closest intersection between two triangles (if any)              
         std::tie(t, uv , active_t) = moeller_trumbore_two_triangles(ray_, t1, t2);
@@ -454,33 +425,21 @@ public:
         if (!m_is_instance && recursion_depth > 0)
             return dr::zeros<SurfaceInteraction3f>();
 
-        // bool detach_shape = has_flag(ray_flags, RayFlags::DetachShape);
-        // bool follow_shape = has_flag(ray_flags, RayFlags::FollowShape);
-        
-        // Transform4f& to_world = m_to_world.value();
-        // Transform4f& to_object = m_to_object.value();
+        bool detach_shape = has_flag(ray_flags, RayFlags::DetachShape);
+        bool follow_shape = has_flag(ray_flags, RayFlags::FollowShape);
 
         SurfaceInteraction3f si = dr::zeros<SurfaceInteraction3f>();
 
         Float t = pi.t;
         si.p = ray(pi.t);
-
-        // if constexpr (IsDiff) {
-
-        // } else {
-        // }
-
-        // Barycentric coords
-        Float b1 = pi.prim_uv.x(),
-        b2 = pi.prim_uv.y(),
-        b0 = 1.f - b1 - b2;
+        Point2f prim_uv = pi.prim_uv;
 
         // ==============================================
         // Compute which triangle we intersected with           TODO: We currently decided to do this on the fly, might be better to pass the index via prim_index, or add another return value to the tuple that's returned from `ray_intersect_preliminary_impl`
         // ==============================================
         //  -------
         //  | \neg|
-        //  |  \  |    Diagonal plane equation outcome mapping (positive --> triangle 1 / negative --> triangle 2)
+        //  |  \  |    Diagonal plane equation outcome mapping
         //  |pos\ |
         //  -------
         Point3f t1[3];
@@ -498,31 +457,66 @@ public:
         hit_tri[1] = dr::select(above_or_below_diagonal_plane > 0, t1[1], t2[1]);
         hit_tri[2] = dr::select(above_or_below_diagonal_plane > 0, t1[2], t2[2]);
 
+        if constexpr (IsDiff) {
+            if (follow_shape && detach_shape)
+                Throw("Invalid combination of RayFlags: DetachShape | FollowShape");
+
+            if (detach_shape) {
+                hit_tri[0] = dr::detach<true>(hit_tri[0]);
+                hit_tri[1] = dr::detach<true>(hit_tri[1]);
+                hit_tri[2] = dr::detach<true>(hit_tri[2]);
+            }
+
+            if(dr::grad_enabled(hit_tri[0], hit_tri[1], hit_tri[2], ray.o, ray.d /* <- any enabled? */) && !follow_shape)
+            {
+                auto [t_d, prim_uv_d, hit] =
+                    moeller_trumbore_two_triangles(ray, t1, t2);
+
+                prim_uv = dr::replace_grad(prim_uv, prim_uv_d);
+                t = dr::replace_grad(t, t_d);
+            }
+        }
+        
+        // Barycentric coords
+        Float b1 = prim_uv.x(),
+              b2 = prim_uv.y(),
+              b0 = 1.f - b1 - b2;
+
+        Vector3f dp0 = hit_tri[1] - hit_tri[0],
+                 dp1 = hit_tri[2] - hit_tri[0];
+
         // Re-interpolate intersection using barycentric coordinates
         si.p = dr::fmadd(hit_tri[0], b0, dr::fmadd(hit_tri[1], b1, hit_tri[2] * b2));
 
         // Potentially recompute the distance traveled to the surface interaction hit point
-        if (IsDiff && has_flag(ray_flags, RayFlags::FollowShape))
+        if (IsDiff && follow_shape)
             t = dr::sqrt(dr::squared_norm(si.p - ray.o) / dr::squared_norm(ray.d));
 
         si.t = dr::select(active, t, dr::Infinity<Float>);
 
         // Face normal 
-        si.n  = dr::normalize(dr::cross(hit_tri[1] - hit_tri[0], hit_tri[2] - hit_tri[0]));
+        si.n  = dr::normalize(dr::cross(dp0, dp1));
 
         // Shading normals
         Normal3f n0, n1, n2;
-        if(m_has_vertex_normals) {
+        if(m_has_vertex_normals && 
+            likely(has_flag(ray_flags, RayFlags::ShadingFrame) ||
+                   has_flag(ray_flags, RayFlags::dNSdUV) ||
+                   has_flag(ray_flags, RayFlags::BoundaryTest))) {
+            n0 = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[0]), vertex_normal(indices[3]));
+            n1 = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[1]), vertex_normal(indices[0]));
+            n2 = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[2]), vertex_normal(indices[2]));
+        }
 
-            if (IsDiff && has_flag(ray_flags, RayFlags::DetachShape)) {
+        if (m_has_vertex_normals &&
+            likely(has_flag(ray_flags, RayFlags::ShadingFrame) ||
+                   has_flag(ray_flags, RayFlags::dNSdUV))) {
+
+            if (IsDiff && detach_shape) {
                 n0 = dr::detach<true>(n0);
                 n1 = dr::detach<true>(n1);
                 n2 = dr::detach<true>(n2);
             }
-
-            n0 = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[0]), vertex_normal(indices[3]));
-            n1 = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[1]), vertex_normal(indices[0]));
-            n2 = dr::select(above_or_below_diagonal_plane > 0, vertex_normal(indices[2]), vertex_normal(indices[2]));
 
             Normal3f n = dr::fmadd(n2, b2, dr::fmadd(n1, b1, n0 * b0));
 
@@ -530,17 +524,17 @@ public:
 
             // TODO: is this computation correct for the heightfield as well (copied from mesh.cpp)?
             if (has_flag(ray_flags, RayFlags::dNSdUV)) {
-            /* Now compute the derivative of "normalize(u*n1 + v*n2 + (1-u-v)*n0)"
-               with respect to [u, v] in the local triangle parameterization.
+                /* Now compute the derivative of "normalize(u*n1 + v*n2 + (1-u-v)*n0)"
+                with respect to [u, v] in the local triangle parameterization.
 
-               Since d/du [f(u)/|f(u)|] = [d/du f(u)]/|f(u)|
-                   - f(u)/|f(u)|^3 <f(u), d/du f(u)>, this results in
-            */
-            si.dn_du = dr::normalize(n1 - n0);
-            si.dn_dv = dr::normalize(n2 - n0);
+                Since d/du [f(u)/|f(u)|] = [d/du f(u)]/|f(u)|
+                    - f(u)/|f(u)|^3 <f(u), d/du f(u)>, this results in
+                */
+                si.dn_du = dr::normalize(n1 - n0);
+                si.dn_dv = dr::normalize(n2 - n0);
 
-            si.dn_du = dr::fnmadd(n, dr::dot(n, si.dn_du), si.dn_du);
-            si.dn_dv = dr::fnmadd(n, dr::dot(n, si.dn_dv), si.dn_dv);
+                si.dn_du = dr::fnmadd(n, dr::dot(n, si.dn_du), si.dn_du);
+                si.dn_dv = dr::fnmadd(n, dr::dot(n, si.dn_dv), si.dn_dv);
             } else {
                 si.dn_du = si.dn_dv = dr::zeros<Vector3f>();
             }     
@@ -548,11 +542,69 @@ public:
             si.sh_frame.n = si.n;         
         }
 
+        // Positional partial derivative
         si.dp_du      = dr::zeros<Vector3f>();
         si.dp_dv      = dr::zeros<Vector3f>();
         
         si.shape    = this;
         si.instance = nullptr;
+
+        if (unlikely(has_flag(ray_flags, RayFlags::BoundaryTest))) {
+            Vector3f rel = si.p - hit_tri[0];
+
+            /* Solve a least squares problem to determine
+            the UV coordinates within the current triangle */
+            Float bb1 = dr::dot(dp0, rel),
+                  bb2 = dr::dot(dp1, rel),
+                  a11 = dr::dot(dp0, dp0),
+                  a12 = dr::dot(dp0, dp1),
+                  a22 = dr::dot(dp1, dp1),
+                  inv_det = dr::rcp(a11 * a22 - a12 * a12);
+
+            Float u = dr::fmsub (a22, bb1, a12 * bb2) * inv_det,
+                  v = dr::fnmadd(a12, bb1, a11 * bb2) * inv_det,
+                  w = 1.f - u - v;
+
+            /* If we are using flat shading, just fall back to a signed distance
+            field of the hit triangle. */
+            if (!m_has_vertex_normals) {
+                // 2D Triangle SDF from Inigo Quilez
+                // https://www.iquilezles.org/www/articles/distfunctions2d/distfunctions2d.htm
+
+                // Equilateral triangle
+                Point2f tp0 = Point2f(0, 0),
+                        tp1 = Point2f(1, 0),
+                        tp2 = Point2f(0.5f, 0.5f * dr::sqrt(3.f));
+
+                Point2f p = tp0 * w + tp1 * u + tp2 * v;
+
+                Vector2f e0 = tp1 - tp0,
+                         e1 = tp2 - tp1,
+                         e2 = tp0 - tp2,
+                         v0 = p - tp0,
+                         v1 = p - tp1,
+                         v2 = p - tp2;
+                Vector2f pq0 = v0 - e0 * dr::clamp(dr::dot(v0, e0) / dr::dot(e0, e0), 0, 1),
+                         pq1 = v1 - e1 * dr::clamp(dr::dot(v1, e1) / dr::dot(e1, e1), 0, 1),
+                         pq2 = v2 - e2 * dr::clamp(dr::dot(v2, e2) / dr::dot(e2, e2), 0, 1);
+                Float s = dr::sign(e0.x() * e2.y() - e0.y() * e2.x());
+                Vector2f d = dr::minimum(dr::minimum(Vector2f(dr::dot(pq0, pq0), s * (v0.x() * e0.y() - v0.y() * e0.x())),
+                                                     Vector2f(dr::dot(pq1, pq1), s * (v1.x() * e1.y() - v1.y() * e1.x()))),
+                                                     Vector2f(dr::dot(pq2, pq2), s * (v2.x() * e2.y() - v2.y() * e2.x())));
+                Float dist = dr::sqrt(d.x());
+                // Scale s.t. farthest point / barycenter is one
+                dist /= dr::sqrt(3.f) / 6.f;
+                si.boundary_test = dist;
+            } else {
+                Normal3f normal = dr::fmadd(n0, w, dr::fmadd(n1, u, n2 * v));
+
+                // Dot product between surface normal and the ray direction is 0 at silhouette points
+                Float dp = dr::dot(normal, -ray.d);
+
+                // Add non-linearity by squaring the returned value
+                si.boundary_test = dr::sqr(dp);
+            }
+        }
 
         return si;
     }
@@ -601,30 +653,29 @@ public:
         // If it found an intersection, the resulting mask should always evaluate to true, t_value + uv-value 
         // of the closest intersection is already handled above. Therefore just `active1 OR active2`.
         dr::mask_t<FloatP>closest_mask = active1 || active2;
-
         return { closest_t, { closest_u, closest_v }, closest_mask };
     }
 
 
-    // TODO: merge scalar and vectorized versions!
+    // TODO: merge scalar and vectorized versions in a clean and non-redundant manner!
     /**
      * Get world-space vertices of a heightfield tile (scalar mode)
      * Tile indexing example (indexing starts on the left bottom of the grid,
      * goes lef):
      * 
-     * x == -1        x == 1
-     * 
-     * ^                ^
-     * |                |
-     * |                |
-     * ------------------ --> y == 1
-     * |    |     |     |
-     * | 6  | 7   | 8   |
-     * |----------------|
-     * |    |     |     |
-     * | 3  | 4   | 5   |
-     * |----------------|
-     * |    |     |     |
+     * x == -1        x == 1                Triangle 1: Left top, left bottom, right bottom (0,1,2)
+     *                                      0-------
+     * ^                ^                   | \    |
+     * |                |                   |  \   |
+     * |                |                   |   \  |    
+     * ------------------ --> y == 1        1------2 
+     * |    |     |     |                   
+     * | 6  | 7   | 8   |                   Triangle 2: Right top , left top, right bottom (3,0,2)           
+     * |----------------|                   0------3
+     * |    |     |     |                   | \    |
+     * | 3  | 4   | 5   |                   |  \   |
+     * |----------------|                   |   \  |
+     * |    |     |     |                   -------2
      * | 0  | 1   | 2   |
      * ------------------ --> y == -1
      * */
@@ -670,9 +721,12 @@ public:
         idx[3]= right_top_index;
     }
 
-    MI_INLINE void get_tile_vertices_scalar(ScalarIndex prim_index, ScalarPoint3f* t1, ScalarPoint3f* t2, Vector4u& idx) const
+    // We have to pass `float* grid` to this version, because both the LLVM/scalar and CUDA versions make use of it in `build_bboxes()`.
+    // The `m_host_grid_data` weak pointer is only set in LLVM/scalar modes. 
+    MI_INLINE void get_tile_vertices_scalar(ScalarIndex prim_index, ScalarPoint3f* t1, ScalarPoint3f* t2, Vector4u& idx, float* grid) const
     {
         float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
+        ScalarTransform4f to_world = m_to_world.scalar();
 
         uint32_t amount_rows = m_res_x - 1;
         uint32_t amount_bboxes_per_row = m_res_y - 1;
@@ -693,14 +747,14 @@ public:
         ScalarPoint2f local_max_target_bounds = ScalarPoint2f(-1.0f + (float)(row_offset + 1) * cell_size[0], -1.0f + (float)(row_nr + 1) * cell_size[1]);
 
         // 0 --> 1 --> 2
-        t1[0] = m_to_world.scalar().transform_affine(ScalarPoint3f{local_min_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[left_top_index] * m_max_height.scalar()});
-        t1[1] = m_to_world.scalar().transform_affine(ScalarPoint3f{local_min_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[left_bottom_index] * m_max_height.scalar()});
-        t1[2] = m_to_world.scalar().transform_affine(ScalarPoint3f{local_max_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[right_bottom_index] * m_max_height.scalar()});
+        t1[0] = to_world.transform_affine(ScalarPoint3f{local_min_target_bounds.x(), local_max_target_bounds.y(), grid[left_top_index] * m_max_height.scalar()});
+        t1[1] = to_world.transform_affine(ScalarPoint3f{local_min_target_bounds.x(), local_min_target_bounds.y(), grid[left_bottom_index] * m_max_height.scalar()});
+        t1[2] = to_world.transform_affine(ScalarPoint3f{local_max_target_bounds.x(), local_min_target_bounds.y(), grid[right_bottom_index] * m_max_height.scalar()});
 
         // 3 --> 0 --> 2
-        t2[0] = m_to_world.scalar().transform_affine(ScalarPoint3f{local_max_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[right_top_index] * m_max_height.scalar()});      
-        t2[1] = m_to_world.scalar().transform_affine(ScalarPoint3f{local_min_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[left_top_index] * m_max_height.scalar()});
-        t2[2] = m_to_world.scalar().transform_affine(ScalarPoint3f{local_max_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[right_bottom_index] * m_max_height.scalar()});
+        t2[0] = to_world.transform_affine(ScalarPoint3f{local_max_target_bounds.x(), local_max_target_bounds.y(), grid[right_top_index] * m_max_height.scalar()});      
+        t2[1] = to_world.transform_affine(ScalarPoint3f{local_min_target_bounds.x(), local_max_target_bounds.y(), grid[left_top_index] * m_max_height.scalar()});
+        t2[2] = to_world.transform_affine(ScalarPoint3f{local_max_target_bounds.x(), local_min_target_bounds.y(), grid[right_bottom_index] * m_max_height.scalar()});
         
         idx[0]= left_top_index;
         idx[1]= left_bottom_index;
