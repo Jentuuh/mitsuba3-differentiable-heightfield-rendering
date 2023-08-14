@@ -200,6 +200,7 @@ public:
         Base::traverse(callback);
         callback->put_parameter("to_world", *m_to_world.ptr(), ParamFlags::Differentiable | ParamFlags::Discontinuous);
         callback->put_parameter("heightfield", m_heightfield_texture.tensor(), ParamFlags::Differentiable | ParamFlags::Discontinuous);
+        callback->put_parameter("max_height", *m_max_height.ptr(), ParamFlags::Differentiable | ParamFlags::Discontinuous);
     }
 
     void parameters_changed(const std::vector<std::string> &keys) override {
@@ -214,6 +215,9 @@ public:
 
             // Update heightfield texture
             m_heightfield_texture.set_tensor(m_heightfield_texture.tensor());
+
+            // Update m_max_height
+            m_max_height = m_max_height.value();
 
             update();
         }
@@ -434,9 +438,7 @@ public:
         si.p = ray(pi.t);
         Point2f prim_uv = pi.prim_uv;
 
-        // ==============================================
         // Compute which triangle we intersected with           TODO: We currently decided to do this on the fly, might be better to pass the index via prim_index, or add another return value to the tuple that's returned from `ray_intersect_preliminary_impl`
-        // ==============================================
         //  -------
         //  | \neg|
         //  |  \  |    Diagonal plane equation outcome mapping
@@ -453,9 +455,9 @@ public:
         Float above_or_below_diagonal_plane = dr::dot(diag_normal, si.p) + D;
 
         Point3f hit_tri[3];
-        hit_tri[0] = dr::select(above_or_below_diagonal_plane > 0, t1[0], t2[0]);
-        hit_tri[1] = dr::select(above_or_below_diagonal_plane > 0, t1[1], t2[1]);
-        hit_tri[2] = dr::select(above_or_below_diagonal_plane > 0, t1[2], t2[2]);
+        hit_tri[0] = dr::select(above_or_below_diagonal_plane > 0 && active, t1[0], t2[0]);
+        hit_tri[1] = dr::select(above_or_below_diagonal_plane > 0 && active, t1[1], t2[1]);
+        hit_tri[2] = dr::select(above_or_below_diagonal_plane > 0 && active, t1[2], t2[2]);
 
         if constexpr (IsDiff) {
             if (follow_shape && detach_shape)
@@ -469,8 +471,7 @@ public:
 
             if(dr::grad_enabled(hit_tri[0], hit_tri[1], hit_tri[2], ray.o, ray.d /* <- any enabled? */) && !follow_shape)
             {
-                auto [t_d, prim_uv_d, hit] =
-                    moeller_trumbore_two_triangles(ray, t1, t2);
+                auto [t_d, prim_uv_d, hit] = moeller_trumbore_two_triangles(ray, t1, t2);
 
                 prim_uv = dr::replace_grad(prim_uv, prim_uv_d);
                 t = dr::replace_grad(t, t_d);
@@ -955,7 +956,11 @@ public:
 #endif
 
     bool parameters_grad_enabled() const override {
-        return dr::grad_enabled(m_to_world);
+        bool result = false;
+        result |= dr::grad_enabled(m_to_world);
+        result |= dr::grad_enabled(m_max_height);
+
+        return result;
     }
 
     std::string to_string() const override {
@@ -1000,11 +1005,9 @@ private:
     // Only valid for CUDA variants
     void *m_device_bboxes = nullptr;
 
-
-    bool m_has_vertex_normals;
-
     // Per vertex normals of triangulated heightfield
     FloatStorage m_vertex_normals; 
+    bool m_has_vertex_normals;
 
     size_t m_amount_primitives = 0;
 };
