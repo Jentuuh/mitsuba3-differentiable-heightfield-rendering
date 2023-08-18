@@ -132,7 +132,8 @@ public:
             size_t shape[3] = {m_res_x, m_res_y, 1};
             
             m_heightfield_texture = InputTexture2f(InputTensorXf((float*)normalized->data(), 3, shape), true, false,
-                dr::FilterMode::Linear, dr::WrapMode::Clamp);        
+                dr::FilterMode::Linear, dr::WrapMode::Clamp);     
+
         } else {
             InputFloat default_data[16] = { 0.f, 0.f, 0.f, 0.f,
                                            0.f, 0.f, 0.f, 0.f, 
@@ -201,10 +202,11 @@ public:
         callback->put_parameter("to_world", *m_to_world.ptr(), ParamFlags::Differentiable | ParamFlags::Discontinuous);
         callback->put_parameter("heightfield", m_heightfield_texture.tensor(), ParamFlags::Differentiable | ParamFlags::Discontinuous);
         callback->put_parameter("max_height", *m_max_height.ptr(), ParamFlags::Differentiable | ParamFlags::Discontinuous);
+        callback->put_parameter("per_vertex_normals", m_vertex_normals, +ParamFlags::NonDifferentiable);
     }
 
     void parameters_changed(const std::vector<std::string> &keys) override {
-        if (keys.empty() || string::contains(keys, "to_world") || string::contains(keys, "heightfield_data")) {
+        if (keys.empty() || string::contains(keys, "to_world") || string::contains(keys, "heightfield") || string::contains(keys, "max_height")) {
             // Ensure previous ray-tracing operation are fully evaluated before
             // modifying the scalar values of the fields in this class
             if constexpr (dr::is_jit_v<Float>)
@@ -646,11 +648,14 @@ public:
         active1 &= t1 >= 0.f && t1 <= ray.maxt;
         active2 &= t2 >= 0.f && t2 <= ray.maxt;
 
+        // We take t1 if both t1 and t2 are valid and t1 is closer, OR if t1 is valid and t2 is not (the closest valid intersection)
+        dr::mask_t<FloatP> hit_triangle_mask = (t1 < t2 && (active1 && active2)) || (active1 && !active2);
+
         // Select the closest triangle (if any intersection was found, this is covered by `closest_mask` below)
-        FloatP closest_t = dr::select(t1 < t2 && active1, t1, t2);
-        FloatP closest_u = dr::select(t1 < t2 && active1, u1, u2);
-        FloatP closest_v = dr::select(t1 < t2 && active1, v1, v2);
-        
+        FloatP closest_t = dr::select(hit_triangle_mask, t1, t2);
+        FloatP closest_u = dr::select(hit_triangle_mask, u1, u2);
+        FloatP closest_v = dr::select(hit_triangle_mask, v1, v2);
+
         // If it found an intersection, the resulting mask should always evaluate to true, t_value + uv-value 
         // of the closest intersection is already handled above. Therefore just `active1 OR active2`.
         dr::mask_t<FloatP>closest_mask = active1 || active2;
@@ -716,10 +721,10 @@ public:
         t2[1] = m_to_world.scalar().transform_affine(Point3fP{local_min_target_bounds.x(), local_max_target_bounds.y(), m_host_grid_data[left_top_index] * m_max_height.scalar()});
         t2[2] = m_to_world.scalar().transform_affine(Point3fP{local_max_target_bounds.x(), local_min_target_bounds.y(), m_host_grid_data[right_bottom_index] * m_max_height.scalar()});
         
-        idx[0]= left_top_index;
-        idx[1]= left_bottom_index;
-        idx[2]= right_bottom_index;
-        idx[3]= right_top_index;
+        idx[0] = left_top_index;
+        idx[1] = left_bottom_index;
+        idx[2] = right_bottom_index;
+        idx[3] = right_top_index;
     }
 
     // We have to pass `float* grid` to this version, because both the LLVM/scalar and CUDA versions make use of it in `build_bboxes()`.
@@ -757,10 +762,10 @@ public:
         t2[1] = to_world.transform_affine(ScalarPoint3f{local_min_target_bounds.x(), local_max_target_bounds.y(), grid[left_top_index] * m_max_height.scalar()});
         t2[2] = to_world.transform_affine(ScalarPoint3f{local_max_target_bounds.x(), local_min_target_bounds.y(), grid[right_bottom_index] * m_max_height.scalar()});
         
-        idx[0]= left_top_index;
-        idx[1]= left_bottom_index;
-        idx[2]= right_bottom_index;
-        idx[3]= right_top_index;
+        idx[0] = left_top_index;
+        idx[1] = left_bottom_index;
+        idx[2] = right_bottom_index;
+        idx[3] = right_top_index;
     }
 
     /**
@@ -798,10 +803,10 @@ public:
         t2[1] = m_to_world.value().transform_affine(Point3f{local_min_target_bounds.x(), local_max_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), left_top_index) * m_max_height.scalar()});
         t2[2] = m_to_world.value().transform_affine(Point3f{local_max_target_bounds.x(), local_min_target_bounds.y(), dr::gather<Float>(m_heightfield_texture.value(), right_bottom_index) * m_max_height.scalar()});
         
-        idx[0]= left_top_index;
-        idx[1]= left_bottom_index;
-        idx[2]= right_bottom_index;
-        idx[3]= right_top_index;
+        idx[0] = left_top_index;
+        idx[1] = left_bottom_index;
+        idx[2] = right_bottom_index;
+        idx[3] = right_top_index;
     }
 
 
@@ -820,6 +825,7 @@ public:
                 InputPoint3f triangle2[3];
                 Vector4u indices;
                 get_tile_vertices_scalar_packet(tile, triangle1, triangle2, indices);
+
                 Vector3u indices_t1 = Vector3u{indices[0], indices[1], indices[2]}; // Store indices for triangle 2 in separate vector to allow easy indexing in loop
                 Vector3u indices_t2 = Vector3u{indices[3], indices[0], indices[2]}; // Store indices for triangle 2 in separate vector to allow easy indexing in loop
                 
@@ -827,7 +833,7 @@ public:
                 update_vertex_normals_scalar(triangle1, normals, indices_t1); 
                 update_vertex_normals_scalar(triangle2, normals, indices_t2);
             }
-            
+
             // Normalize all normals
             for (ScalarSize i = 0; i < vertex_count; i++) {
                 InputNormal3f n = normals[i];
@@ -888,15 +894,21 @@ public:
         if constexpr (!dr::is_dynamic_v<Float>) {
             InputVector3f   side_0 = triangle[1] - triangle[0],
                             side_1 = triangle[2] - triangle[0];
-            InputNormal3f face_normal = dr::normalize(dr::cross(side_0, side_1));
+            InputNormal3f face_normal = dr::cross(side_0, side_1);
             
-            // Vectorize side pairs to compute simultaneously
-            auto side1 = transpose(dr::Array<dr::Packet<InputFloat, 3>, 3>{ side_0, triangle[2] - triangle[1], triangle[0] - triangle[2] });
-            auto side2 = transpose(dr::Array<dr::Packet<InputFloat, 3>, 3>{ side_1, triangle[0] - triangle[1], triangle[1] - triangle[2] });
-            InputVector3f face_angles = unit_angle(dr::normalize(side1), dr::normalize(side2));
+            InputFloat length_sqr = dr::squared_norm(face_normal);
+            if (likely(length_sqr > 0)) {
+                face_normal *= dr::rsqrt(length_sqr);
+                
+                // Vectorize side pairs to compute simultaneously
+                auto side1 = transpose(dr::Array<dr::Packet<InputFloat, 3>, 3>{ side_0, triangle[2] - triangle[1], triangle[0] - triangle[2] });
+                auto side2 = transpose(dr::Array<dr::Packet<InputFloat, 3>, 3>{ side_1, triangle[0] - triangle[1], triangle[1] - triangle[2] });
+                InputVector3f face_angles = unit_angle(dr::normalize(side1), dr::normalize(side2));
 
-            for (size_t j = 0; j < 3; ++j)
-                vertex_normals[indices[j]] += face_normal * face_angles[j];
+                for (size_t j = 0; j < 3; ++j) {
+                    vertex_normals[indices[j]] += face_normal * face_angles[j];
+                }
+            }
         }  
     }
 
@@ -904,15 +916,15 @@ public:
     {
         if constexpr (dr::is_dynamic_v<Float>) {
             Vector3f face_normal = dr::normalize(dr::cross(triangle[1] - triangle[0], triangle[2] - triangle[0]));
-
+    
             for (int i = 0; i < 3; ++i) {
                 Vector3f d0 = dr::normalize(triangle[(i + 1) % 3] - triangle[i]);
                 Vector3f d1 = dr::normalize(triangle[(i + 2) % 3] - triangle[i]);
                 Float face_angle = dr::safe_acos(dr::dot(d0, d1));
-
+                
                 Vector3f nn = face_normal * face_angle;
                 for (int j = 0; j < 3; ++j)
-                    dr::scatter_reduce(ReduceOp::Add, vertex_normals[j], nn[j], indices[j]);
+                    dr::scatter_reduce(ReduceOp::Add, vertex_normals[j], nn[j], indices[i]);
             }
         }
     }
@@ -959,6 +971,7 @@ public:
         bool result = false;
         result |= dr::grad_enabled(m_to_world);
         result |= dr::grad_enabled(m_max_height);
+        result |= dr::grad_enabled(m_heightfield_texture); 
 
         return result;
     }
