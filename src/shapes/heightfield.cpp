@@ -203,6 +203,8 @@ public:
         callback->put_parameter("heightfield", m_heightfield_texture.tensor(), ParamFlags::Differentiable | ParamFlags::Discontinuous);
         callback->put_parameter("max_height", *m_max_height.ptr(), ParamFlags::Differentiable | ParamFlags::Discontinuous);
         callback->put_parameter("per_vertex_normals", m_vertex_normals, +ParamFlags::NonDifferentiable);
+        callback->put_parameter("res_x", m_res_x, +ParamFlags::NonDifferentiable);
+        callback->put_parameter("res_y", m_res_y, +ParamFlags::NonDifferentiable);
     }
 
     void parameters_changed(const std::vector<std::string> &keys) override {
@@ -522,6 +524,8 @@ public:
             }
 
             Normal3f n = dr::fmadd(n2, b2, dr::fmadd(n1, b1, n0 * b0));
+            Float il = dr::rsqrt(dr::squared_norm(n));
+            n *= il;
 
             si.sh_frame.n = dr::normalize(n);
 
@@ -533,8 +537,8 @@ public:
                 Since d/du [f(u)/|f(u)|] = [d/du f(u)]/|f(u)|
                     - f(u)/|f(u)|^3 <f(u), d/du f(u)>, this results in
                 */
-                si.dn_du = dr::normalize(n1 - n0);
-                si.dn_dv = dr::normalize(n2 - n0);
+                si.dn_du = (n1 - n0) * il;
+                si.dn_dv = (n2 - n0) * il;
 
                 si.dn_du = dr::fnmadd(n, dr::dot(n, si.dn_du), si.dn_du);
                 si.dn_dv = dr::fnmadd(n, dr::dot(n, si.dn_dv), si.dn_dv);
@@ -544,6 +548,9 @@ public:
         } else {
             si.sh_frame.n = si.n;         
         }
+
+        // Global UV's (heightmap space)
+        si.uv = Point2f((si.p.x() + 1.0f) / 2.0f, (si.p.y() + 1.0f) / 2.0f);
 
         // Positional partial derivative
         si.dp_du      = dr::zeros<Vector3f>();
@@ -608,7 +615,7 @@ public:
                 si.boundary_test = dr::sqr(dp);
             }
         }
-
+        
         return si;
     }
     
@@ -994,7 +1001,7 @@ private:
     InputTexture2f m_heightfield_texture;
 
     // Resolution of heightfield texture in X and Y dimensions
-    size_t m_res_x, m_res_y;
+    uint32_t m_res_x, m_res_y;
 
     // Max height displacement of each texel in the heightfield texture. A texel
     // with value 1.0 will be displaced by `m_max_height`, while a texel with value
