@@ -43,6 +43,11 @@ X- and Y-axes.
    - Name of the heightfield texture that stores the heightfield.
    - |exposed|
 
+ * - resolution
+   - |int|
+   - Resolution for default heightfield. In case `filename` wasn't provided, this resolution will be used to initialize a
+    'flat' heightfield (all texels are initialized to 0.0). In case `filename` was provided, this parameter is ignored. (Default = 128);
+
  * - max_height
    - |float|
    - Maximal height displacement of the heightfield. (Default = 1.0f);
@@ -127,25 +132,26 @@ public:
 
             m_res_x = normalized->width();
             m_res_y = normalized->height();
+            m_vertex_count = m_res_x * m_res_y;
 
-            // --!-- Tensor dimension should be texture dimension + 1 (for color channels) --!--
+            // Tensor dimension should be texture dimension + 1 (--> for color channel)
             size_t shape[3] = {m_res_x, m_res_y, 1};
             
             m_heightfield_texture = InputTexture2f(InputTensorXf((float*)normalized->data(), 3, shape), true, false,
                 dr::FilterMode::Linear, dr::WrapMode::Clamp);     
 
         } else {
-            InputFloat default_data[16] = { 0.f, 0.f, 0.f, 0.f,
-                                           0.f, 0.f, 0.f, 0.f, 
-                                           0.f, 0.f, 0.f, 0.f,
-                                           0.f, 0.f, 0.f, 0.f };
+            uint32_t resolution = props.get<int>("resolution", 128);
 
-            m_res_x = 4;
-            m_res_y = 4;
+            m_res_x = resolution;
+            m_res_y = resolution;
+            m_vertex_count = m_res_x * m_res_y;
 
+            std::vector<float> default_data = std::vector<float>(resolution * resolution);
+ 
             size_t default_shape[3] = { m_res_x, m_res_y, 1 };
             m_heightfield_texture = InputTexture2f(
-                InputTensorXf(default_data, 3, default_shape), true, false,
+                InputTensorXf(default_data.data(), 3, default_shape), true, false,
                 dr::FilterMode::Linear, dr::WrapMode::Clamp);
         }
 
@@ -164,18 +170,13 @@ public:
     }
 
     void  update() {
-        auto [S, Q, T] =
-            dr::transform_decompose(m_to_world.scalar().matrix, 25);
-        if (dr::abs(Q[0]) > 1e-6f || dr::abs(Q[1]) > 1e-6f ||               // TODO: Remove this? (I am not sure why rotations wouldn't be allowed for a triangulated heightfield)
-            dr::abs(Q[2]) > 1e-6f || dr::abs(Q[3] - 1) > 1e-6f)
-            Log(Warn, "'to_world' transform shouldn't perform any rotations, "
-                      "use instancing (`shapegroup` and `instance` plugins) "
-                      "instead!");
-
-        Vector3f dp_du = m_to_world.value() * Vector3f(2.f, 0.f, 0.f);
-        Vector3f dp_dv = m_to_world.value() * Vector3f(0.f, 2.f, 0.f);
-        Normal3f normal = dr::normalize(m_to_world.value() * Normal3f(0.f, 0.f, 1.f));
-        m_frame = Frame3f(dp_du, dp_dv, normal);
+        // auto [S, Q, T] =
+        //     dr::transform_decompose(m_to_world.scalar().matrix, 25);
+        // if (dr::abs(Q[0]) > 1e-6f || dr::abs(Q[1]) > 1e-6f ||               // TODO: Remove this? (I am not sure why rotations wouldn't be allowed for a triangulated heightfield)
+        //     dr::abs(Q[2]) > 1e-6f || dr::abs(Q[3] - 1) > 1e-6f)
+        //     Log(Warn, "'to_world' transform shouldn't perform any rotations, "
+        //               "use instancing (`shapegroup` and `instance` plugins) "
+        //               "instead!");
 
         m_to_object = m_to_world.value().inverse();
 
@@ -191,7 +192,7 @@ public:
                  m_amount_primitives) = build_bboxes();
 
         // Update per-vertex normals
-        if (m_has_vertex_normals)
+        if(m_has_vertex_normals)
             recompute_vertex_normals();
 
         mark_dirty();
@@ -222,6 +223,24 @@ public:
 
             // Update m_max_height
             m_max_height = m_max_height.value();
+
+            // Update vertex count and vertex normals storage in case the heightfield resolution changed
+            bool mesh_attributes_changed = false;
+            if(m_heightfield_texture.tensor().shape(0) * m_heightfield_texture.tensor().shape(1) != m_vertex_count)
+            {
+                Log(Info, "parameters_changed(): Heightfield vertex count (resolution) changed, updating it.");
+                mesh_attributes_changed = true;
+                m_res_x = m_heightfield_texture.tensor().shape(0);
+                m_res_y = m_heightfield_texture.tensor().shape(1);
+
+                m_vertex_count = m_res_x * m_res_y;
+
+            }
+            if (m_has_vertex_normals && m_vertex_normals.size() != m_vertex_count * 3) {
+                Log(Info, "parameters_changed(): Heightfield vertex normal count changed, updating it.");
+                mesh_attributes_changed = true;
+                m_vertex_normals = dr::zeros<FloatStorage>(m_vertex_count * 3);
+            }
 
             update();
         }
@@ -942,7 +961,7 @@ public:
         using Result = Normal<dr::replace_scalar_t<Index, InputFloat>, 3>;
         return dr::gather<Result>(m_vertex_normals, index, active);
     }
-    
+
 
 #if defined(MI_ENABLE_CUDA)
     using Base::m_optix_data_ptr;
@@ -1008,8 +1027,6 @@ private:
     // 0.0 won't be displaced at all. 
     field<Float> m_max_height; 
     
-    Frame3f m_frame;
-
     // Weak pointer to underlying grid texture data. Only used for llvm/scalar
     // variants. We store this because during raytracing, we don't want to call
     // Texture3f::tensor().data() which internally calls jit_var_ptr and is
@@ -1028,6 +1045,10 @@ private:
     // Per vertex normals of triangulated heightfield
     FloatStorage m_vertex_normals; 
     bool m_has_vertex_normals;
+
+    // The amount of vertices the heightfield consists of, this should be equal to
+    // the resolution of the heightfield texture
+    ScalarSize m_vertex_count = 0;
 
     size_t m_amount_primitives = 0;
 };
