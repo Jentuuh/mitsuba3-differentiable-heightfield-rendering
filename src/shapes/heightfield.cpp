@@ -40,7 +40,7 @@ X- and Y-axes.
 
  * - filename
    - |string|
-   - Name of the heightfield texture that stores the heightfield.
+   - Name of the heightfield texture that stores the heightfield. (Single color channel, .bmp file format)
    - |exposed|
 
  * - resolution
