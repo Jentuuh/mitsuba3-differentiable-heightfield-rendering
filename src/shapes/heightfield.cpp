@@ -46,7 +46,7 @@ X- and Y-axes.
  * - resolution
    - |int|
    - Resolution for default heightfield. In case `filename` wasn't provided, this resolution will be used to initialize a
-    'flat' heightfield (all texels are initialized to 0.0). In case `filename` was provided, this parameter is ignored. (Default = 128);
+    'flat' heightfield (all texels are initialized to 0.0). In case `filename` was provided, this parameter will be ignored. (Default = 128);
 
  * - max_height
    - |float|
@@ -118,8 +118,10 @@ public:
     Heightfield(const Properties &props) : Base(props) {        
         // Maximal height value of the heightfield (normalized height values will be scaled accordingly)
         m_max_height = props.get<ScalarFloat>("max_height", 1.0f);
-
-        // Load heightfield data into Bitmap object
+        
+        // ==================================
+        // Load heightfield data from bitmap
+        // ==================================
         if (props.has_property("filename")) {
             FileResolver *fs   = Thread::thread()->file_resolver();
             fs::path file_path = fs->resolve(props.string("filename"));
@@ -140,7 +142,11 @@ public:
             m_heightfield_texture = InputTexture2f(InputTensorXf((float*)normalized->data(), 3, shape), true, false,
                 dr::FilterMode::Linear, dr::WrapMode::Clamp);     
 
-        } else {
+        } 
+        // ================================================
+        // Load flat heightfield with specified resolution
+        // ================================================
+        else {
             uint32_t resolution = props.get<int>("resolution", 128);
 
             m_res_x = resolution;
@@ -170,14 +176,6 @@ public:
     }
 
     void  update() {
-        // auto [S, Q, T] =
-        //     dr::transform_decompose(m_to_world.scalar().matrix, 25);
-        // if (dr::abs(Q[0]) > 1e-6f || dr::abs(Q[1]) > 1e-6f ||               // TODO: Remove this? (I am not sure why rotations wouldn't be allowed for a triangulated heightfield)
-        //     dr::abs(Q[2]) > 1e-6f || dr::abs(Q[3] - 1) > 1e-6f)
-        //     Log(Warn, "'to_world' transform shouldn't perform any rotations, "
-        //               "use instancing (`shapegroup` and `instance` plugins) "
-        //               "instead!");
-
         m_to_object = m_to_world.value().inverse();
 
         if constexpr (!dr::is_cuda_v<Float>) {
@@ -202,7 +200,7 @@ public:
         Base::traverse(callback);
         callback->put_parameter("to_world", *m_to_world.ptr(), ParamFlags::Differentiable | ParamFlags::Discontinuous);
         callback->put_parameter("heightfield", m_heightfield_texture.tensor(), ParamFlags::Differentiable | ParamFlags::Discontinuous);
-        callback->put_parameter("max_height", *m_max_height.ptr(), ParamFlags::Differentiable | ParamFlags::Discontinuous);
+        callback->put_parameter("max_height", *m_max_height.ptr(), +ParamFlags::NonDifferentiable);
         callback->put_parameter("per_vertex_normals", m_vertex_normals, +ParamFlags::NonDifferentiable);
         callback->put_parameter("res_x", m_res_x, +ParamFlags::NonDifferentiable);
         callback->put_parameter("res_y", m_res_y, +ParamFlags::NonDifferentiable);
@@ -228,16 +226,14 @@ public:
             bool mesh_attributes_changed = false;
             if(m_heightfield_texture.tensor().shape(0) * m_heightfield_texture.tensor().shape(1) != m_vertex_count)
             {
-                Log(Info, "parameters_changed(): Heightfield vertex count (resolution) changed, updating it.");
+                Log(Debug, "parameters_changed(): Heightfield vertex count (resolution) changed, updating it.");
                 mesh_attributes_changed = true;
                 m_res_x = m_heightfield_texture.tensor().shape(0);
                 m_res_y = m_heightfield_texture.tensor().shape(1);
-
                 m_vertex_count = m_res_x * m_res_y;
-
             }
             if (m_has_vertex_normals && m_vertex_normals.size() != m_vertex_count * 3) {
-                Log(Info, "parameters_changed(): Heightfield vertex normal count changed, updating it.");
+                Log(Debug, "parameters_changed(): Heightfield vertex normal count changed, updating it.");
                 mesh_attributes_changed = true;
                 m_vertex_normals = dr::zeros<FloatStorage>(m_vertex_count * 3);
             }
@@ -548,7 +544,6 @@ public:
 
             si.sh_frame.n = dr::normalize(n);
 
-            // TODO: is this computation correct for the heightfield as well (copied from mesh.cpp)?
             if (has_flag(ray_flags, RayFlags::dNSdUV)) {
                 /* Now compute the derivative of "normalize(u*n1 + v*n2 + (1-u-v)*n0)"
                 with respect to [u, v] in the local triangle parameterization.
@@ -763,8 +758,8 @@ public:
         uint32_t amount_rows = m_res_x - 1;
         uint32_t amount_bboxes_per_row = m_res_y - 1;
         uint32_t values_per_row = m_res_x;
-        uint32_t row_nr = dr::floor((float)prim_index / (float) amount_bboxes_per_row); // floor(prim_index / amount_bboxes_per_row)
-        uint32_t row_offset = prim_index % (amount_bboxes_per_row); // prim_index % amount_bboxes_per_row
+        uint32_t row_nr = dr::floor((float)prim_index / (float) amount_bboxes_per_row);
+        uint32_t row_offset = prim_index % (amount_bboxes_per_row);
 
         // `(amount_rows - row_nr) * values_per_row` gives us the offset to get to the current row, we add the 
         // row offset to this to get the absolute offset to obtain the corresponding texel of the
@@ -804,8 +799,8 @@ public:
         UInt32 amount_rows = m_res_x - 1;
         UInt32 amount_bboxes_per_row = m_res_y - 1;
         UInt32 values_per_row = m_res_x;
-        UInt32 row_nr = dr::floor((Float)prim_index / (Float)amount_bboxes_per_row); // floor(prim_index / amount_bboxes_per_row)
-        UInt32 row_offset = prim_index % (amount_bboxes_per_row); // prim_index % amount_bboxes_per_row
+        UInt32 row_nr = dr::floor((Float)prim_index / (Float)amount_bboxes_per_row);
+        UInt32 row_offset = prim_index % (amount_bboxes_per_row); 
 
         // `(amount_rows - row_nr) * values_per_row` gives us the offset to get to the current row, we add the 
         // row offset to this to get the absolute offset to obtain the corresponding texel of the
