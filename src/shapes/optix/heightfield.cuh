@@ -24,11 +24,11 @@ struct IntersectResult {
 __device__ void get_tile_vertices(unsigned int tile_index, Vector3f* vertices, OptixHeightfieldData* heightfield) {
     float cell_size[2] = { 2.0f / (heightfield->res_x  - 1), 2.0f / (heightfield->res_y - 1)};
 
-    unsigned int amount_rows = heightfield->res_x - 1;
-    unsigned int amount_bboxes_per_row = heightfield->res_y - 1;
+    unsigned int amount_rows = heightfield->res_y - 1;
+    unsigned int amount_bboxes_per_row = heightfield->res_x- 1;
 
     unsigned int values_per_row = heightfield->res_x;
-    unsigned int row_nr = floor((float)tile_index / (float) amount_bboxes_per_row);
+    unsigned int row_nr = tile_index / amount_bboxes_per_row;
     unsigned int row_offset = tile_index % (amount_bboxes_per_row);
 
     // `(amount_rows - row_nr) * values_per_row` gives us the offset to get to the current row, we add the 
@@ -40,8 +40,8 @@ __device__ void get_tile_vertices(unsigned int tile_index, Vector3f* vertices, O
     unsigned int right_top_idx = (amount_rows - (row_nr + 1)) * values_per_row + row_offset + 1;
 
     // Compute the fractional bounds of the cell we're testing the intersection for
-    Vector2f local_min_target_bounds = { -1.0f + (float)row_offset * cell_size[0], -1.0f + (float)row_nr * cell_size[1] };
-    Vector2f local_max_target_bounds = { -1.0f + (float)(row_offset + 1) * cell_size[0], -1.0f + (float)(row_nr + 1) * cell_size[1] };
+    Vector2f local_min_target_bounds = { -1.0f + row_offset * cell_size[0], -1.0f + row_nr * cell_size[1] };
+    Vector2f local_max_target_bounds = { -1.0f + (row_offset + 1) * cell_size[0], -1.0f + (row_nr + 1) * cell_size[1] };
 
     vertices[0] = heightfield->to_world.transform_point(Vector3f{local_min_target_bounds.x(), local_max_target_bounds.y(), heightfield->grid_data[left_top_idx] * heightfield->max_height });
     vertices[1] = heightfield->to_world.transform_point(Vector3f{local_min_target_bounds.x(), local_min_target_bounds.y(), heightfield->grid_data[left_bottom_idx] * heightfield->max_height });

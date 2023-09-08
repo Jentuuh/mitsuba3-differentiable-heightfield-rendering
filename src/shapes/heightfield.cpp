@@ -43,10 +43,17 @@ X- and Y-axes.
    - Name of the heightfield texture that stores the heightfield. (Single color channel, .bmp file format)
    - |exposed|
 
- * - resolution
-   - |int|
-   - Resolution for default heightfield. In case `filename` wasn't provided, this resolution will be used to initialize a
-    'flat' heightfield (all texels are initialized to 0.0). In case `filename` was provided, this parameter will be ignored. (Default = 128);
+ * - resolution_x
+   - |integer|
+   - Resolution along the x-axis for default heightfield (width of the heightfield texture). In case `filename` wasn't provided, this resolution 
+     will be used to initialize a 'flat' heightfield (all texels are initialized to 0.0). In case `filename` was provided, this parameter will 
+     be ignored. (Default = 128);
+
+ * - resolution_y
+   - |integer|
+   - Resolution along the y-axis for default heightfield (height of the heightfield texture). In case `filename` wasn't provided, this resolution 
+     will be used to initialize a 'flat' heightfield (all texels are initialized to 0.0). In case `filename` was provided, this parameter will 
+     be ignored. (Default = 128);
 
  * - max_height
    - |float|
@@ -129,11 +136,15 @@ public:
                 Log(Error, "\"%s\": file does not exist!", file_path);
             ref<Bitmap> heightfield_bitmap = new Bitmap(file_path);
             
-            // Convert to float32 representation
-            ref<Bitmap> normalized = heightfield_bitmap->convert(Bitmap::PixelFormat::Y, Struct::Type::Float32, false);
+            ref<Bitmap> normalized = heightfield_bitmap;
+
+            // Convert to single-channel float32 representation
+            if(heightfield_bitmap->channel_count() > 1)
+                normalized = heightfield_bitmap->convert(Bitmap::PixelFormat::Y, Struct::Type::Float32, false);
 
             m_res_x = normalized->width();
             m_res_y = normalized->height();
+
             m_vertex_count = m_res_x * m_res_y;
 
             // Tensor dimension should be texture dimension + 1 (--> for color channel)
@@ -141,24 +152,35 @@ public:
             
             m_heightfield_texture = InputTexture2f(InputTensorXf((float*)normalized->data(), 3, shape), true, false,
                 dr::FilterMode::Linear, dr::WrapMode::Clamp);     
-
         } 
         // ================================================
         // Load flat heightfield with specified resolution
         // ================================================
         else {
-            uint32_t resolution = props.get<int>("resolution", 128);
+            uint32_t resolution_x = props.get<int>("resolution_x", 128);
+            uint32_t resolution_y = props.get<int>("resolution_y", 128);
 
-            m_res_x = resolution;
-            m_res_y = resolution;
+            m_res_x = resolution_x;
+            m_res_y = resolution_y;
             m_vertex_count = m_res_x * m_res_y;
 
-            std::vector<float> default_data = std::vector<float>(resolution * resolution);
+            std::vector<float> default_data = std::vector<float>(m_vertex_count);
  
             size_t default_shape[3] = { m_res_x, m_res_y, 1 };
             m_heightfield_texture = InputTexture2f(
                 InputTensorXf(default_data.data(), 3, default_shape), true, false,
                 dr::FilterMode::Linear, dr::WrapMode::Clamp);
+        }
+
+        // Aspect ratio scaling
+        if(m_res_x != m_res_y)
+        {
+            if(m_res_x < m_res_y)
+            {
+                m_to_world = m_to_world.scalar() * ScalarTransform4f::scale(ScalarVector3f((float)m_res_x / (float)m_res_y, 1.0f, 1.0f ));
+            } else {
+                m_to_world = m_to_world.scalar() * ScalarTransform4f::scale(ScalarVector3f(1.0f, (float)m_res_y / (float)m_res_x, 1.0f ));
+            }
         }
 
         // Per-vertex normal buffer
@@ -280,9 +302,9 @@ public:
 
         // Loop over heightfield tiles and build AABB for each
         size_t count = 0;
-        ScalarPoint3f tri_1[3];
-        ScalarPoint3f tri_2[3];
-        Vector4u indices;
+        ScalarPoint3f tri_1[3] = {ScalarPoint3f(), ScalarPoint3f(), ScalarPoint3f()};
+        ScalarPoint3f tri_2[3] = {ScalarPoint3f(), ScalarPoint3f(), ScalarPoint3f()};
+        Vector4u indices = dr::zeros<Vector4u>();
         for (size_t tile = 0; tile < max_bbox_count; tile++) {
             ScalarBoundingBox3f bbox;
             get_tile_vertices_scalar(tile, tri_1, tri_2, indices, grid);
@@ -313,7 +335,8 @@ public:
 
     /**
      * The heightfield contains a `m_max_height` member that forms a boundary on the maximum vertical displacement of heightfield texels.
-     * This allows us to easily build a bounding box that encapsulates the entire heightfield.
+     * This allows us to easily build a bounding box that encapsulates the entire heightfield. 
+     * TODO: make a better fitting one by taking the maximum value from the texture
      **/
     ScalarBoundingBox3f bbox() const override {
         ScalarBoundingBox3f bbox;
@@ -714,10 +737,10 @@ public:
 
         float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
 
-        uint32_t amount_rows = m_res_x - 1;
-        uint32_t amount_bboxes_per_row = m_res_y - 1;
+        uint32_t amount_rows = m_res_y - 1;
+        uint32_t amount_bboxes_per_row = m_res_x - 1;
         uint32_t values_per_row = m_res_x;
-        uint32_t row_nr = dr::floor((float)prim_index / (float) amount_bboxes_per_row); // floor(prim_index / amount_bboxes_per_row)
+        uint32_t row_nr = prim_index / amount_bboxes_per_row; // floor(prim_index / amount_bboxes_per_row)
         uint32_t row_offset = prim_index % (amount_bboxes_per_row); // prim_index % amount_bboxes_per_row
 
         // `(amount_rows - row_nr) * values_per_row` gives us the offset to get to the current row, we add the 
@@ -755,10 +778,10 @@ public:
         float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
         ScalarTransform4f to_world = m_to_world.scalar();
 
-        uint32_t amount_rows = m_res_x - 1;
-        uint32_t amount_bboxes_per_row = m_res_y - 1;
+        uint32_t amount_rows = m_res_y - 1;
+        uint32_t amount_bboxes_per_row = m_res_x - 1;
         uint32_t values_per_row = m_res_x;
-        uint32_t row_nr = dr::floor((float)prim_index / (float) amount_bboxes_per_row);
+        uint32_t row_nr = prim_index / amount_bboxes_per_row;
         uint32_t row_offset = prim_index % (amount_bboxes_per_row);
 
         // `(amount_rows - row_nr) * values_per_row` gives us the offset to get to the current row, we add the 
@@ -766,7 +789,7 @@ public:
         // current AABB (+ 1 in both dimensions to get right and top texels)  
         uint32_t left_bottom_index = (amount_rows - row_nr) * values_per_row + row_offset;
         uint32_t right_bottom_index = (amount_rows - row_nr) * values_per_row + row_offset + 1;
-        uint32_t left_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset;
+        uint64_t left_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset;
         uint32_t right_top_index = (amount_rows - (row_nr + 1)) * values_per_row + row_offset + 1;
 
         // Compute the fractional bounds of the tile we're testing the intersection for
@@ -796,10 +819,10 @@ public:
     {
         float cell_size[2] = { 2.0f / (m_res_x - 1), 2.0f / (m_res_y - 1)};
 
-        UInt32 amount_rows = m_res_x - 1;
-        UInt32 amount_bboxes_per_row = m_res_y - 1;
+        UInt32 amount_rows = m_res_y - 1;
+        UInt32 amount_bboxes_per_row = m_res_x - 1;
         UInt32 values_per_row = m_res_x;
-        UInt32 row_nr = dr::floor((Float)prim_index / (Float)amount_bboxes_per_row);
+        UInt32 row_nr = prim_index / amount_bboxes_per_row;
         UInt32 row_offset = prim_index % (amount_bboxes_per_row); 
 
         // `(amount_rows - row_nr) * values_per_row` gives us the offset to get to the current row, we add the 
@@ -838,8 +861,8 @@ public:
        uint32_t vertex_count = m_res_x * m_res_y;
 
         if constexpr (!dr::is_dynamic_v<Float>) {
-        size_t invalid_counter = 0;
-        std::vector<InputNormal3f> normals(vertex_count, dr::zeros<InputNormal3f>());
+            size_t invalid_counter = 0;
+            std::vector<InputNormal3f> normals(vertex_count, dr::zeros<InputNormal3f>());
 
             for(ScalarSize tile = 0; tile < (m_res_x - 1) * (m_res_y - 1); tile++){
                 InputPoint3f triangle1[3]; 
